@@ -2,6 +2,7 @@ package main
 
 import (
     "bufio"
+    "encoding/base64"
     "errors"
     "fmt"
     "io"
@@ -15,15 +16,15 @@ import (
 )
 
 func main() {
-    if len(os.Args) != 2 {
-        fmt.Printf(`usage: %s ip:port
+    if len(os.Args) != 3 {
+        fmt.Printf(`usage: %s ip:port user:pass
 
 get file:
-  wget --content-disposition "http://ip:port?/root/tmp.txt"
-  curl -OJ "http://ip:port?/root/tmp.txt"
+  wget --auth-no-challenge --user=user --password=pass --content-disposition "http://ip:port?/home/tmp.txt"
+  curl -u user:pass -OJ "http://ip:port?/home/tmp.txt"
 post file:
-  wget -q -O - --post-file=d:\tmp.txt "http://ip:port?/root/tmp.txt"
-  curl "http://ip:port?/root/tmp.txt" --data-binary @d:\tmp.txt
+  wget -qO - --auth-no-challenge --user=user --password=pass --post-file=C:\tmp.txt "http://ip:port?/home/tmp.txt"
+  curl -u user:pass --data-binary @C:\tmp.txt "http://ip:port?/home/tmp.txt"
 `, os.Args[0])
         return
     }
@@ -37,6 +38,7 @@ post file:
     }
 
     fmt.Printf("Listen: [%s]\n", addr)
+    authStr = "Basic " + base64.StdEncoding.EncodeToString([]byte(os.Args[2]))
     for {
         ln, err := ser.AcceptTCP()
         if err != nil {
@@ -57,6 +59,8 @@ const (
     respMsg   = "HTTP/1.1 200 OK\r\nContent-Type:text/plain;charset=utf-8\r\nContent-Disposition:attachment;filename=resp.txt\r\nContent-Length:%d\r\n\r\n%s"
     getHeader = "HTTP/1.1 200 OK\r\nContent-Type:application/octet-stream\r\nContent-Disposition:attachment;filename=%s\r\nContent-Length:%d\r\nContent-Transfer-Encoding:binary\r\n\r\n"
 )
+
+var authStr string // 授权信息
 
 func respData(w io.Writer, data string) {
     msg := data + "\r\n"
@@ -82,12 +86,13 @@ func handleFile(l *net.TCPConn) error {
     return nil
 }
 
-func getHeaderMsg(r *bufio.Reader) (string, string, int64, error) {
-    // 内存复用,更快速,省内存
-    bytesToString := func(b []byte) string {
-        return *(*string)(unsafe.Pointer(&b))
-    }
+// 内存复用,更快速,省内存
+func bytesToString(b []byte) string {
+    return *(*string)(unsafe.Pointer(&b))
+}
 
+func getHeaderMsg(r *bufio.Reader) (string, string, int64, error) {
+    // 读取第一行,提取有用信息
     line, _, err := r.ReadLine()
     if err != nil {
         return "", "", 0, err
@@ -117,21 +122,28 @@ func getHeaderMsg(r *bufio.Reader) (string, string, int64, error) {
         return "", "", 0, errors.New(method + " not support")
     }
 
+    var authCheck string
     for {
         line, _, err = r.ReadLine()
         if err != nil {
             return "", "", 0, err
         }
         if len(line) == 0 {
-            break // 遇到空行,则之后为请求体
+            break // 遇到空行,之后为请求体
         }
-        if method == "POST" { // POST请求才需要通过header找到消息体长度
-            header = strings.Split(bytesToString(line), ":")
-            if len(header) == 2 && strings.ToLower(header[0]) == "content-length" {
-                // 获取消息体长度字节数
-                length, _ = strconv.ParseInt(strings.TrimSpace(header[1]), 10, 64)
+        header = strings.Split(bytesToString(line), ":")
+        if len(header) == 2 { // 头部[key: val]解析
+            header[0] = strings.ToLower(strings.TrimSpace(header[0]))
+            header[1] = strings.TrimSpace(header[1])
+            if method == "POST" && header[0] == "content-length" {
+                length, _ = strconv.ParseInt(header[1], 10, 64)
+            } else if header[0] == "authorization" {
+                authCheck = header[1]
             }
         }
+    }
+    if authCheck != authStr {
+        return "", "", 0, errors.New("authorization error")
     }
     return method, path, length, nil
 }
@@ -173,9 +185,9 @@ func newProgress(r io.Reader, size int64) io.ReadCloser {
     // 在处理数据中用非阻塞方式往chan中传处理字节数
     go func(rate <-chan int64, all int64) {
         for cur := range rate {
-            fmt.Printf("\rhandle:%4d", cur*100/all)
+            fmt.Printf("\rhandle:%4d%%", cur*100/all)
         }
-        fmt.Printf("\rhandle: 100\r\n\r\n")
+        fmt.Printf("\rhandle: 100%%\r\n\r\n")
     }(p.rate, size)
     return p
 }
