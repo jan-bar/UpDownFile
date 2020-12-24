@@ -16,19 +16,13 @@ import (
 )
 
 func main() {
-    if len(os.Args) != 3 {
-        fmt.Printf(`usage: %s ip:port user:pass
-
-get file:
-  wget --auth-no-challenge --user=user --password=pass --content-disposition "http://ip:port?/home/tmp.txt"
-  curl -u user:pass -OJ "http://ip:port?/home/tmp.txt"
-post file:
-  wget -qO - --auth-no-challenge --user=user --password=pass --post-file=C:\tmp.txt "http://ip:port?/home/tmp.txt"
-  curl -u user:pass --data-binary @C:\tmp.txt "http://ip:port?/home/tmp.txt"
-`, os.Args[0])
+    if len(os.Args) != 4 {
+        fmt.Printf("usage: %s ip:port user pass\n", os.Args[0])
         return
     }
-    addr, err := net.ResolveTCPAddr("tcp", os.Args[1])
+    addrStr, user, pass := os.Args[1], os.Args[2], os.Args[3]
+
+    addr, err := net.ResolveTCPAddr("tcp", addrStr)
     if err != nil {
         panic(err)
     }
@@ -37,8 +31,14 @@ post file:
         panic(err)
     }
 
-    fmt.Printf("Listen: [%s]\n", addr)
-    authStr = "Basic " + base64.StdEncoding.EncodeToString([]byte(os.Args[2]))
+    fmt.Printf(`get file:
+  wget --auth-no-challenge --user=%s --password=%s --content-disposition "http://%s?path"
+  curl -u %s:%s -OJ "http://%s?path"
+post file:
+  wget -qO - --auth-no-challenge --user=%s --password=%s --post-file=C:\file "http://%s?path"
+  curl -u %s:%s --data-binary @C:\file "http://%s?path"
+`, user, pass, addr, user, pass, addr, user, pass, addr, user, pass, addr)
+    authStr = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
     for {
         ln, err := ser.AcceptTCP()
         if err != nil {
