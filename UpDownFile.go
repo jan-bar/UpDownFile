@@ -15,12 +15,20 @@ import (
     "unsafe"
 )
 
+var authStr string // 授权信息
+
 func main() {
-    if len(os.Args) != 4 {
-        fmt.Printf("usage: %s ip:port user pass\n", os.Args[0])
+    var addrStr, user, pass string
+    switch len(os.Args) {
+    case 2: // 无认证模式
+        addrStr = os.Args[1]
+    case 4: // 添加用户名密码认证
+        addrStr, user, pass = os.Args[1], os.Args[2], os.Args[3]
+        authStr = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+    default:
+        fmt.Printf("usage: %s ip:port [user] [pass]\n", os.Args[0])
         return
     }
-    addrStr, user, pass := os.Args[1], os.Args[2], os.Args[3]
 
     addr, err := net.ResolveTCPAddr("tcp", addrStr)
     if err != nil {
@@ -31,14 +39,23 @@ func main() {
         panic(err)
     }
 
-    fmt.Printf(`get file:
+    if authStr != "" {
+        fmt.Printf(`get file:
   wget --auth-no-challenge --user=%s --password=%s --content-disposition "http://%s?path"
   curl -u %s:%s -OJ "http://%s?path"
 post file:
   wget -qO - --auth-no-challenge --user=%s --password=%s --post-file=C:\file "http://%s?path"
   curl -u %s:%s --data-binary @C:\file "http://%s?path"
 `, user, pass, addr, user, pass, addr, user, pass, addr, user, pass, addr)
-    authStr = "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+    } else {
+        fmt.Printf(`get file:
+  wget --content-disposition "http://%s?path"
+  curl -OJ "http://%s?path"
+post file:
+  wget -qO - --post-file=C:\file "http://%s?path"
+  curl --data-binary @C:\file "http://%s?path"
+`, addr, addr, addr, addr)
+    }
     for {
         ln, err := ser.AcceptTCP()
         if err != nil {
@@ -59,8 +76,6 @@ const (
     respMsg   = "HTTP/1.1 200 OK\r\nContent-Type:text/plain;charset=utf-8\r\nContent-Disposition:attachment;filename=resp.txt\r\nContent-Length:%d\r\n\r\n%s"
     getHeader = "HTTP/1.1 200 OK\r\nContent-Type:application/octet-stream\r\nContent-Disposition:attachment;filename=%s\r\nContent-Length:%d\r\nContent-Transfer-Encoding:binary\r\n\r\n"
 )
-
-var authStr string // 授权信息
 
 func respData(w io.Writer, data string) {
     msg := data + "\r\n"
@@ -142,7 +157,7 @@ func getHeaderMsg(r *bufio.Reader) (string, string, int64, error) {
             }
         }
     }
-    if authCheck != authStr {
+    if authStr != "" && authStr != authCheck {
         return "", "", 0, errors.New("authorization error")
     }
     return method, path, length, nil
