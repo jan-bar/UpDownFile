@@ -13,9 +13,6 @@ import (
     "path/filepath"
     "strconv"
     "strings"
-    "unsafe"
-
-    "github.com/davecgh/go-spew/spew"
 )
 
 var authStr string // 授权信息
@@ -127,7 +124,7 @@ func (h *httpHandle) getHeader() error {
     if err != nil {
         return err
     }
-    header := strings.Fields(bytesToString(line))
+    header := strings.Fields(string(line))
     if len(header) < 3 { // 首行至少3列数据
         return errors.New("header error")
     }
@@ -149,7 +146,7 @@ func (h *httpHandle) getHeader() error {
         if len(line) == 0 {
             break // 遇到空行,之后为请求体
         }
-        tmp := bytesToString(line)
+        tmp := string(line)
         if index := strings.Index(tmp, ":"); index > 0 { // key: val
             h.header[strings.ToLower(strings.TrimSpace(tmp[:index]))] = strings.TrimSpace(tmp[index+1:])
         }
@@ -217,12 +214,84 @@ func (h *httpHandle) get() error {
 }
 
 func (h *httpHandle) post() error {
-    spew.Dump(h.method, h.urlPath, h.header)
     var size int64
     if tmp, ok := h.header["content-length"]; ok {
         size, _ = strconv.ParseInt(tmp, 10, 0)
     }
-    _ = size
+    if size <= 0 {
+        return errors.New("content-length error")
+    }
+    var boundary string
+    if tmp, ok := h.header["content-type"]; ok {
+        for _, v := range strings.Split(tmp, ";") {
+            if v = strings.TrimSpace(v); v == "multipart/form-data" {
+                ok = false
+            } else if strings.HasPrefix(v, "boundary=") {
+                boundary = "--" + v[9:]
+            }
+        }
+        if ok { // 没有multipart/form-data则置空
+            boundary = ""
+        }
+    }
+    if boundary == "" {
+        return errors.New("content-type error")
+    }
+
+    line, _, err := h.r.ReadLine()
+    if err != nil {
+        return err
+    }
+    if string(line) != boundary {
+        return errors.New(boundary + " != " + string(line))
+    }
+    delSize := len(boundary) + 4
+
+    for {
+        line, _, err = h.r.ReadLine()
+        if err != nil {
+            return err
+        }
+        if len(line) == 0 {
+            break // 遇到空行,之后为请求体
+        }
+        delSize += len(line) + 2
+        tmp := string(line)
+        if index := strings.Index(tmp, ":"); index > 0 { // key: val
+            h.header[strings.ToLower(strings.TrimSpace(tmp[:index]))] = strings.TrimSpace(tmp[index+1:])
+        }
+    }
+    var filename string
+    if tmp, ok := h.header["content-disposition"]; ok {
+        for _, v := range strings.Split(tmp, ";") {
+            if v = strings.TrimSpace(v); v == "form-data" {
+                ok = false
+            } else if strings.HasPrefix(v, "filename=") {
+                filename = strings.Trim(v[9:], "\"")
+            }
+        }
+        if ok { // 没有multipart/form-data则置空
+            filename = ""
+        }
+    }
+    size -= int64(delSize)
+
+    fw, err := os.Create(filename)
+    if err != nil {
+        return err
+    }
+    defer fw.Close()
+    pr := newProgress(h.r, filename, size)
+    _, err = io.CopyN(fw, pr, size)
+    pr.Close()
+    if err != nil {
+        return err
+    }
+    err = fw.Truncate(size - int64(len(boundary)) - 6)
+    if err != nil {
+        return err
+    }
+    h.respMessage("post ok")
     return nil
 }
 
@@ -265,12 +334,24 @@ func (p *progress) Close() error {
     return nil
 }
 
-// 将字节数转为带单位字符串
-func convertByte(b int64) string {
-    return strconv.FormatInt(b, 10)
+var unitByte = []struct {
+    byte float64
+    unit string
+}{
+    {byte: 1},
+    {1 << 10, "B"},
+    {1 << 20, "KB"},
+    {1 << 30, "MB"},
+    {1 << 40, "GB"},
+    {1 << 50, "TB"},
 }
 
-// 内存复用,更快速,省内存
-func bytesToString(b []byte) string {
-    return *(*string)(unsafe.Pointer(&b))
+// 将字节数转为带单位字符串
+func convertByte(b int64) string {
+    for tmp, i := float64(b), 1; i < len(unitByte); i++ {
+        if tmp < unitByte[i].byte {
+            return fmt.Sprintf("%.2f %s", tmp/unitByte[i-1].byte, unitByte[i].unit)
+        }
+    }
+    return strconv.FormatInt(b, 10) + " B"
 }
