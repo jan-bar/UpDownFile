@@ -5,7 +5,6 @@ import (
     "io"
     "io/ioutil"
     "net/http"
-    "net/url"
     "os"
     "path/filepath"
     "sort"
@@ -46,14 +45,14 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
         err := handleGetFile(w, r)
         if err != nil {
             w.Header().Set("Content-Type", "text/html;charset=utf-8")
-            w.Write([]byte("<html><head><title>message</title></head><body><center><h2>"))
+            w.Write(htmlMsgPrefix)
             w.Write([]byte(err.Error()))
-            w.Write([]byte("</h2></center></body></html>"))
+            w.Write(htmlMsgSuffix)
         }
     } else if r.Method == http.MethodPost {
         err := handlePostFile(w, r)
         if err == nil {
-            w.Write([]byte("ok"))
+            w.Write(respOk)
         } else {
             w.Write([]byte(err.Error()))
         }
@@ -74,7 +73,7 @@ func handlePostFile(_ http.ResponseWriter, r *http.Request) error {
     if err != nil {
         return err
     }
-    pr := newProgress(fr, "POST "+path, fh.Size)
+    pr := newProgress(fr, r.Method+": "+path, fh.Size)
     _, err = io.Copy(fw, pr)
     fw.Close() // 刷新到文件
     pr.Close()
@@ -90,11 +89,17 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
 
     if fi.IsDir() {
         sortType, _ := strconv.Atoi(r.FormValue("sort"))
+        if sortType < 0 || sortType > 5 {
+            sortType = 0
+        }
         dir, err := sortDir(path, sortDirType(sortType))
         if err != nil {
             return err
         }
-        w.Write(htmlPrefix)
+        w.Write(htmlPrefix0)
+        w.Write(htmlRadio[sortType])
+        w.Write(htmlPrefix1)
+        prePath := strings.TrimLeft(r.URL.Path+"/", "/")
         for i, v := range dir {
             w.Write(htmlTrTd)
             w.Write([]byte(strconv.Itoa(i + 1)))
@@ -109,7 +114,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
             w.Write(htmlTdTd)
             w.Write([]byte(v.ModTime().Format(timeLayout)))
             w.Write(htmlTdTdA)
-            w.Write([]byte(url.PathEscape(strings.TrimLeft(r.URL.Path+"/"+v.Name(), "/"))))
+            w.Write([]byte(prePath + v.Name()))
             w.Write(htmlGt)
             w.Write([]byte(v.Name()))
             w.Write(htmlAtdTr)
@@ -130,7 +135,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
     wh.Set("Content-Length", strconv.FormatInt(size, 10))
     wh.Set("Content-Disposition", "attachment;filename="+filepath.Base(r.URL.Path))
     wh.Set("Content-Transfer-Encoding", "binary")
-    pr := newProgress(fr, "GET "+path, size)
+    pr := newProgress(fr, r.Method+": "+path, size)
     _, err = io.Copy(w, pr)
     pr.Close()
     return err
@@ -139,91 +144,71 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
 const timeLayout = "2006-01-02 15:04:05"
 
 var (
-    htmlTrTd   = []byte("<tr><td>")
-    htmlDir    = []byte{'D'}
-    htmlFile   = []byte{'F'}
-    htmlTdTd   = []byte("</td><td>")
-    htmlTdTdA  = []byte("</td><td><a href=\"")
-    htmlGt     = []byte("\">")
-    htmlAtdTr  = []byte("</a></td></tr>")
-    htmlPrefix = []byte(`<html><head><title>list dir</title></head><body><div style="position:fixed;bottom:20px;right:20px">
-<p><label><input type="radio" name="sort" onclick="sortDir(0)">文件名升序</label></p>
-<p><label><input type="radio" name="sort" onclick="sortDir(1)">文件名降序</label></p>
-<p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label></p>
-<p><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p>
-<p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label></p>
-<p><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>
+    htmlMsgPrefix = []byte("<html><head><title>message</title></head><body><center><h2>")
+    htmlMsgSuffix = []byte("</h2></center></body></html>")
+    respOk        = []byte("ok")
 
-<p><input type="file" id="upload"></p>
-<progress value="0" id="progress"></progress>
-<p><input type="button" onclick="uploadFile()" value="上传文件"></p>
-
-<input type="button" onclick="backSuper()" value="返回上级"/>
-<a href="#top">顶部</a>
-<a href="#bottom">底部</a>
-</div>
-<script>
-function uploadFile() {
-    var upload=document.getElementById('upload').files[0];
-    if (!upload) {
-        alert('请选择上传文件');
-        return
+    htmlTrTd    = []byte("<tr><td>")
+    htmlDir     = []byte{'D'}
+    htmlFile    = []byte{'F'}
+    htmlTdTd    = []byte("</td><td>")
+    htmlTdTdA   = []byte("</td><td><a href=\"")
+    htmlGt      = []byte("\">")
+    htmlAtdTr   = []byte("</a></td></tr>")
+    htmlPrefix0 = []byte(`<html lang="zh"><head><title>list dir</title></head><body><div style="position:fixed;bottom:20px;right:10px">`)
+    htmlRadio   = [][]byte{
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)" checked>目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)" checked>目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)" checked>时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)" checked>时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)" checked>大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
+        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)" checked>大小降序</label></p>`),
     }
-    var params = new FormData();
-    params.append('upload', upload);
-    var xhr = new XMLHttpRequest();
-    xhr.onerror = function () {
-        alert('请求失败');
-    }
-    xhr.onreadystatechange = function () {
-        if (xhr.readyState == 4) {
-            if (xhr.status == 200) {
-                if (xhr.responseText == "ok") {
-                    window.location.reload();
-                }else{
-                    alert(xhr.responseText);
+    htmlPrefix1 = []byte(`<p><input type="file" id="upload"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/><a href="#top">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
+    htmlSuffix  = []byte(`</table><a name="bottom"></a><script>
+    function uploadFile() {
+        let upload = document.getElementById('upload').files[0];
+        if (!upload) {
+            alert('请选择上传文件');
+            return
+        }
+        let params = new FormData();
+        params.append('upload', upload);
+        let xhr = new XMLHttpRequest();
+        xhr.onerror = function () {
+            alert('请求失败');
+        }
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                    if (xhr.responseText === "ok") {
+                        window.location.reload();
+                    } else {
+                        alert(xhr.responseText);
+                    }
+                } else {
+                    alert(xhr.status);
                 }
-            } else {
-                console.error(xhr.status)
             }
         }
+        let progress = document.getElementById('progress');
+        xhr.upload.onprogress = function (e) {
+            progress.value = e.loaded;
+            progress.max = e.total;
+        }
+        xhr.open('POST', window.location.pathname, true);
+        xhr.send(params);
     }
-    var progress=document.getElementById('progress');
-    xhr.upload.onprogress = function (e) {
-        progress.value = e.loaded;
-        progress.max = e.total;
+
+    function sortDir(type) {
+        window.location.href = window.location.origin + window.location.pathname + '?sort=' + type;
     }
-var url=new URL(window.location.href);
-    xhr.open('POST', url.pathname, true);
-    xhr.send(params);
-}
-function sortDir(type) {
-    var url=window.location.href;
-    var i=url.indexOf('?');
-if (i>0){
-window.location.href=url.substr(0,i)+'?sort='+type;
-}else{
-window.location.href=url+'?sort='+type;
-}
-}
-function backSuper(type) {
-    var url=window.location.href;
-    var i=url.indexOf('?');
-if (i>0){
-i=url.substring(0,i).lastIndexOf('/');
-if (i>0){
-window.location.href=url.substr(0,i);
-}
-}else{
-i=url.lastIndexOf('/');
-if (i>0){
-window.location.href=url.substr(0,i);
-}
-}
-}
-</script>
-<table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
-    htmlSuffix = []byte("</table><a name=\"bottom\"></a></body></html>")
+
+    function backSuper() {
+        let url = window.location.pathname;
+        window.location.href = window.location.origin + url.substring(0, url.lastIndexOf('/'));
+    }
+</script></body></html>`)
 )
 
 /*--------------------------------下面是工具类---------------------------------*/
@@ -328,19 +313,19 @@ func newProgress(r io.Reader, prefix string, size int64) io.ReadCloser {
         for cur := range rate {
             fmt.Printf(format, cur)
         }
-        fmt.Printf(format+"\r\n\r\n", size)
+        fmt.Printf(format+"\r\n", size)
     }(p.rate, fmt.Sprintf("\r%s [%%%dd - %d]", prefix, cnt, size), size)
     return p
 }
 
-func (p *progress) Read(b []byte) (int, error) {
-    n, err := p.r.Read(b)
+func (p *progress) Read(b []byte) (n int, err error) {
+    n, err = p.r.Read(b)
     p.cnt += int64(n)
     select { // 非阻塞方式往chan中写数据
     case p.rate <- p.cnt:
     default:
     }
-    return n, err
+    return
 }
 
 func (p *progress) Close() error {
