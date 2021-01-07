@@ -167,48 +167,49 @@ var (
 <p><input type="file" id="upload"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
 <a href="#top">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
     htmlSuffix = []byte(`</table><a name="bottom"></a><script>
-    function uploadFile() {
-        let upload = document.getElementById('upload').files[0];
-        if (!upload) {
-            alert('请选择上传文件');
-            return
-        }
-        let params = new FormData();
-        params.append('upload', upload);
-        let xhr = new XMLHttpRequest();
-        xhr.onerror = function () {
-            alert('请求失败');
-        }
-        xhr.onreadystatechange = function () {
-            if (xhr.readyState === 4) {
-                if (xhr.status === 200) {
-                    if (xhr.responseText === "ok") {
-                        window.location.reload();
-                    } else {
-                        alert(xhr.responseText);
-                    }
+function uploadFile() {
+    let upload = document.getElementById('upload').files[0]
+    if (!upload) {
+        alert('请选择上传文件')
+        return
+    }
+    let params = new FormData()
+    params.append('upload', upload)
+    let xhr = new XMLHttpRequest()
+    xhr.onerror = function () {
+        alert('请求失败')
+    }
+    xhr.onreadystatechange = function () {
+        if (xhr.readyState === 4) {
+            if (xhr.status === 200) {
+                if (xhr.responseText === "ok") {
+                    window.location.reload()
                 } else {
-                    alert(xhr.status);
+                    alert(xhr.responseText)
                 }
+            } else {
+                alert(xhr.status)
             }
         }
-        let progress = document.getElementById('progress');
-        xhr.upload.onprogress = function (e) {
-            progress.value = e.loaded;
-            progress.max = e.total;
-        }
-        xhr.open('POST', window.location.pathname, true);
-        xhr.send(params);
     }
-
-    function sortDir(type) {
-        window.location.href = window.location.origin + window.location.pathname + '?sort=' + type;
+    let progress = document.getElementById('progress')
+    xhr.upload.onprogress = function (e) {
+        progress.value = e.loaded
+        progress.max = e.total
     }
-
-    function backSuper() {
-        let url = window.location.pathname;
-        window.location.href = window.location.origin + url.substring(0, url.lastIndexOf('/'));
-    }
+    xhr.open('POST', window.location.pathname, true)
+    xhr.send(params)
+}
+function sortDir(type) {
+    window.location.href = window.location.origin + window.location.pathname + '?sort=' + type
+}
+function backSuper() {
+    let url = window.location.pathname
+    let i = url.length - 1
+    for (; i >= 0 && url[i] === '/'; i--) {}
+    for (; i >= 0 && url[i] !== '/'; i--) {}
+    window.location.href = window.location.origin + url.substring(0, i + 1)
+}
 </script></body></html>`)
 )
 
