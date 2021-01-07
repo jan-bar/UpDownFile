@@ -5,11 +5,11 @@ import (
     "io"
     "io/ioutil"
     "net/http"
+    "net/url"
     "os"
     "path/filepath"
     "sort"
     "strconv"
-    "strings"
 )
 
 var basePath string
@@ -88,24 +88,27 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
     }
 
     if fi.IsDir() {
-        sortType, _ := strconv.Atoi(r.FormValue("sort"))
-        if sortType < 0 || sortType > 5 {
-            sortType = 0
+        tmpInt, _ := strconv.Atoi(r.FormValue("sort"))
+        if tmpInt < 0 || tmpInt > 5 {
+            tmpInt = 0
         }
-        dir, err := sortDir(path, sortDirType(sortType))
+        dir, err := sortDir(path, sortDirType(tmpInt))
         if err != nil {
             return err
         }
-        w.Write(htmlPrefix0)
-        w.Write(htmlRadio[sortType])
-        w.Write(htmlPrefix1)
-        prePath := strings.TrimLeft(r.URL.Path+"/", "/")
+        tmpInt = htmlIndex[tmpInt]
+        w.Write(htmlPrefix[:tmpInt])
+        w.Write(htmlChecked) // 加入默认被选中
+        w.Write(htmlPrefix[tmpInt:])
+        var link string
         for i, v := range dir {
             w.Write(htmlTrTd)
             w.Write([]byte(strconv.Itoa(i + 1)))
             w.Write(htmlTdTd)
+            link = url.PathEscape(v.Name())
             if v.IsDir() {
                 w.Write(htmlDir)
+                link += "/"
             } else {
                 w.Write(htmlFile)
             }
@@ -114,7 +117,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request) error {
             w.Write(htmlTdTd)
             w.Write([]byte(v.ModTime().Format(timeLayout)))
             w.Write(htmlTdTdA)
-            w.Write([]byte(prePath + v.Name()))
+            w.Write([]byte(link))
             w.Write(htmlGt)
             w.Write([]byte(v.Name()))
             w.Write(htmlAtdTr)
@@ -155,17 +158,15 @@ var (
     htmlTdTdA   = []byte("</td><td><a href=\"")
     htmlGt      = []byte("\">")
     htmlAtdTr   = []byte("</a></td></tr>")
-    htmlPrefix0 = []byte(`<html lang="zh"><head><title>list dir</title></head><body><div style="position:fixed;bottom:20px;right:10px">`)
-    htmlRadio   = [][]byte{
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)" checked>目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)" checked>目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)" checked>时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)" checked>时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)" checked>大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>`),
-        []byte(`<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p><p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)" checked>大小降序</label></p>`),
-    }
-    htmlPrefix1 = []byte(`<p><input type="file" id="upload"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/><a href="#top">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
-    htmlSuffix  = []byte(`</table><a name="bottom"></a><script>
+    htmlChecked = []byte(" checked")
+    htmlIndex   = [6]int{172, 252, 340, 420, 508, 588} // 插入checked位置
+    htmlPrefix  = []byte(`<html lang="zh"><head><title>list dir</title></head><body><div style="position:fixed;bottom:20px;right:10px">
+<p><label><input type="radio" name="sort" onclick="sortDir(0)">目录升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">目录降序</label></p>
+<p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p>
+<p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>
+<p><input type="file" id="upload"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
+<a href="#top">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
+    htmlSuffix = []byte(`</table><a name="bottom"></a><script>
     function uploadFile() {
         let upload = document.getElementById('upload').files[0];
         if (!upload) {
@@ -213,12 +214,12 @@ var (
 
 /*--------------------------------下面是工具类---------------------------------*/
 const (
-    sortDirTypeByNameAsc  sortDirType = iota // 文件名升序
-    sortDirTypeByNameDesc                    // 文件名降序
+    sortDirTypeByNameAsc  sortDirType = iota // 目录升序
+    sortDirTypeByNameDesc                    // 目录降序
     sortDirTypeByTimeAsc                     // 时间升序
     sortDirTypeByTimeDesc                    // 时间降序
-    sortDirTypeBySizeAsc                     // 文件大小升序
-    sortDirTypeBySizeDesc                    // 文件大小降序
+    sortDirTypeBySizeAsc                     // 大小升序
+    sortDirTypeBySizeDesc                    // 大小降序
 )
 
 type (
@@ -255,7 +256,7 @@ func (d *dirInfoSort) Less(x, y int) bool {
     }
     switch d.sortType {
     default:
-        fallthrough // 不在范围内采取文件名升序
+        fallthrough // 不在范围内采取目录升序
     case sortDirTypeByNameAsc:
         return d.Default(x, y)
     case sortDirTypeByNameDesc:
@@ -347,10 +348,13 @@ var unitByte = []struct {
 
 // 将字节数转为带单位字符串
 func convertByte(b int64) string {
-    for tmp, i := float64(b), 1; i < len(unitByte); i++ {
+    tmp, unit := float64(b), "B"
+    for i := 1; i < len(unitByte); i++ {
         if tmp < unitByte[i].byte {
-            return fmt.Sprintf("%.2f %s", tmp/unitByte[i-1].byte, unitByte[i].unit)
+            tmp /= unitByte[i-1].byte
+            unit = unitByte[i].unit
+            break
         }
     }
-    return strconv.FormatInt(b, 10) + " B"
+    return strconv.FormatFloat(tmp, 'f', 2, 64) + unit
 }
