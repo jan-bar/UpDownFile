@@ -8,6 +8,7 @@ import (
     "fmt"
     "io"
     "io/ioutil"
+    "net"
     "net/http"
     "net/url"
     "os"
@@ -16,6 +17,7 @@ import (
     "strconv"
     "strings"
     "sync"
+    "time"
 )
 
 var basePath string
@@ -30,21 +32,39 @@ func main() {
         fmt.Printf("usage: %s ip:port [path]\n", os.Args[0])
         return
     }
-    var err error
+
+    err := getIcoBytes()
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
     basePath, err = filepath.Abs(basePath)
     if err != nil {
         fmt.Println(err)
         return
     }
-    err = getIcoBytes()
+
+    addr, err := net.Listen("tcp", os.Args[1])
     if err != nil {
         fmt.Println(err)
         return
     }
+    defer addr.Close()
+    addrStr := addr.Addr().String()
+
+    fmt.Printf(`dir [%s]
+
+get file:
+    wget --content-disposition "http://%s/dir/tmp.txt"
+    curl -OJ "http://%s/dir/tmp.txt"
+post file:
+    wget -qO - --post-file=C:\tmp.txt "http://%s/dir/tmp.txt"
+    curl --data-binary @C:\tmp.txt "http://%s/dir/tmp.txt"
+    curl -F "file=@C:\tmp.txt" "http://%s/dir/"
+`, basePath, addrStr, addrStr, addrStr, addrStr, addrStr)
 
     http.HandleFunc("/", upDownFile)
-    fmt.Printf("handle [%s] [%s]\n", os.Args[1], basePath)
-    err = http.ListenAndServe(os.Args[1], nil)
+    err = (&http.Server{ReadHeaderTimeout: time.Second * 30}).Serve(addr)
     if err != nil {
         fmt.Println(err)
         return
@@ -53,7 +73,7 @@ func main() {
 
 var (
     bytePool = sync.Pool{New: func() interface{} {
-        return make([]byte, 32<<10)
+        return make([]byte, 32768) // 32<<10
     }}
     icoBytes []byte // ico图标数据
 )
@@ -99,21 +119,36 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
-    fr, fh, err := r.FormFile("file")
-    if err != nil {
-        return err
+    var (
+        path string
+        size int64
+        fr   io.ReadCloser
+    )
+    if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
+        s, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 0)
+        if err != nil {
+            return err
+        }
+        // 上传原始数据保存到文件,r.URL.Path必须为文件路径
+        fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
+    } else {
+        rf, fh, err := r.FormFile("file")
+        if err != nil {
+            return err
+        }
+        // 支持multipart/form-data方式上传,r.URL.Path为路径,文件名在参数里面
+        fr, size, path = rf, fh.Size, filepath.Join(basePath, r.URL.Path, fh.Filename)
     }
     defer fr.Close()
 
-    path := filepath.Join(basePath, r.URL.Path, fh.Filename)
     fw, err := os.Create(path)
     if err != nil {
         return err
     }
 
-    pr := newProgress(fr, r.Method+": "+path, fh.Size)
+    pr := newProgress(fr, r.Method+": "+path, size)
     _, err = io.CopyBuffer(fw, pr, buf)
-    fw.Close()
+    fw.Close() // 趁早写入到文件
     pr.Close()
     if err != nil {
         return err
@@ -182,7 +217,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     wh.Set("Content-Length", strconv.FormatInt(size, 10))
     wh.Set("Content-Disposition", "attachment;filename="+filepath.Base(r.URL.Path))
     wh.Set("Content-Transfer-Encoding", "binary")
-    pr := newProgress(fr, r.Method+": "+path, size)
+    pr := newProgress(fr, r.Method+" : "+path, size)
     _, err = io.CopyBuffer(w, pr, buf)
     pr.Close()
     return err
