@@ -3,8 +3,10 @@ package main
 import (
     "bytes"
     "compress/zlib"
+    "crypto/cipher"
     "encoding/base64"
     "errors"
+    "flag"
     "fmt"
     "io"
     "io/ioutil"
@@ -20,23 +22,35 @@ import (
     "time"
 )
 
+const (
+    timeLayout   = "2006-01-02 15:04:05"
+    encryptFlag  = "encrypt"
+    headerLength = "Content-Length"
+    janbarLength = "Janbar-Length"
+    headerType   = "Content-Type"
+    urlencoded   = "application/x-www-form-urlencoded"
+)
+
 func main() {
-    switch len(os.Args) {
-    case 2:
-        basePath = "."
-    case 3:
-        basePath = os.Args[2]
-    default:
-        fmt.Printf("usage: %s ip:port [path]\n", os.Args[0])
+    if len(os.Args) >= 2 && os.Args[1] == "cli" {
+        if err := clientMain(); err != nil {
+            fmt.Println(err)
+        }
         return
     }
 
-    addr, err := net.Listen("tcp", os.Args[1])
+    var addrStr string
+    flag.StringVar(&basePath, "p", ".", "path")
+    flag.StringVar(&addrStr, "s", ":8080", "ip:port")
+    flag.BoolVar(&useEncrypt, "e", false, "encrypt data")
+    flag.Parse()
+
+    addr, err := net.Listen("tcp", addrStr)
     if err != nil {
         fmt.Println(err)
         return
     }
-    addrStr := addr.Addr().String()
+    addrStr = addr.Addr().String()
 
     basePath, err = filepath.Abs(basePath)
     if err != nil {
@@ -53,9 +67,7 @@ POST file:
     wget -qO - --post-file=C:\tmp.txt "http://%s/dir/tmp.txt"
     curl --data-binary @C:\tmp.txt "http://%s/dir/tmp.txt"
     curl -F "file=@C:\tmp.txt" "http://%s/dir/"
-PUT file:
-    curl -C - -T C:\tmp.txt "http://%s/dir/tmp.txt"
-`, basePath, addrStr, addrStr, addrStr, addrStr, addrStr, addrStr, addrStr)
+`, basePath, addrStr, addrStr, addrStr, addrStr, addrStr, addrStr)
 
     http.HandleFunc("/", upDownFile)
     http.HandleFunc("/favicon.ico", faviconIco)
@@ -73,7 +85,8 @@ var (
         sync.Once
         data []byte
     }
-    basePath string
+    basePath   string
+    useEncrypt bool
 )
 
 func faviconIco(w http.ResponseWriter, _ *http.Request) {
@@ -89,39 +102,25 @@ func faviconIco(w http.ResponseWriter, _ *http.Request) {
 }
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
-    buf := bytePool.Get().([]byte)
-    defer bytePool.Put(buf) // 使用缓存
     var err error
+    buf := bytePool.Get().([]byte)
+    defer bytePool.Put(buf)
     switch r.Method {
+    case http.MethodHead:
+        err = handleHeadFile(w, r, buf)
     case http.MethodGet:
         err = handleGetFile(w, r, buf)
     case http.MethodPost:
         err = handlePostFile(w, r, buf)
-    case http.MethodPut:
-        err = handlePutFile(w, r, buf)
     default:
         err = errors.New(r.Method + " not support")
     }
     if err != nil {
-        w.Header().Set("Content-Type", "text/html;charset=utf-8")
+        w.Header().Set(headerType, "text/html;charset=utf-8")
         w.Write(htmlMsgPrefix)
         w.Write([]byte(err.Error()))
         w.Write(htmlMsgSuffix)
     }
-}
-
-// 支持断点上传
-func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
-    size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 0)
-    if err != nil {
-        return errors.New("invalid length")
-    }
-    var start, end, length int64
-    n, err := fmt.Sscanf(r.Header.Get("Content-Range"), "bytes %d-%d/%d", &start, &end, &length)
-    if err != nil || n != 3 || size != length {
-        return errors.New("invalid range")
-    }
-    return nil
 }
 
 func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
@@ -130,10 +129,13 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         size int64
         fr   io.ReadCloser
     )
-    if r.Header.Get("Content-Type") == "application/x-www-form-urlencoded" {
-        s, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 0)
-        if err != nil {
-            return err
+    if r.Header.Get(headerType) == urlencoded {
+        s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
+        if err != nil { // headerLength在使用golang的http.post时会被去掉
+            s, err = strconv.ParseInt(r.Header.Get(janbarLength), 10, 0)
+            if err != nil {
+                return err
+            }
         }
         fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
     } else {
@@ -150,7 +152,7 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         return err
     }
 
-    pw := newProgress(fw, "POST>"+path, size)
+    pw := handleWriteData(fw, nil, "POST>"+path, size)
     _, err = io.CopyBuffer(pw, fr, buf)
     fw.Close() // 趁早写入文件
     pw.Close()
@@ -169,6 +171,9 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     }
 
     if fi.IsDir() {
+        if useEncrypt { // 加密方式不支持浏览目录,懒得写前端代码
+            return errors.New("encrypt method not support list dir")
+        }
         tmpInt, _ := strconv.Atoi(r.FormValue("sort"))
         if tmpInt < 0 || tmpInt > 5 {
             tmpInt = 0
@@ -209,14 +214,14 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         }
         w.Write(htmlSuffix)
     } else {
-        pw := newProgress(w, "GET >"+path, fi.Size())
+        pw := handleWriteData(w, nil, "GET >"+path, fi.Size())
+        if useEncrypt {
+        }
         http.ServeFile(pw, r, path)
         pw.Close()
     }
     return nil
 }
-
-const timeLayout = "2006-01-02 15:04:05"
 
 var (
     htmlMsgPrefix = []byte("<html><head><title>message</title></head><body><center><h2>")
@@ -284,6 +289,130 @@ function backSuper() {
 }
 </script></body></html>`)
 )
+
+/*--------------------------------下面是客户端---------------------------------*/
+func clientMain() error {
+    fs := flag.NewFlagSet(os.Args[0]+" cli", flag.ExitOnError)
+    httpUrl := fs.String("u", "", "http url")
+    data := fs.String("d", "", "post data")
+    output := fs.String("o", "", "output")
+    encrypt := fs.Bool("e", false, "encrypt data")
+    fs.Parse(os.Args[2:])
+
+    if *httpUrl == "" {
+        return errors.New("url is null")
+    }
+
+    buf := bytePool.Get().([]byte)
+    defer bytePool.Put(buf)
+    if *data != "" {
+        return clientPost(*data, *httpUrl, *encrypt, buf)
+    }
+    return clientGet(*httpUrl, *output, *encrypt, buf)
+}
+
+func clientPost(data, url string, encrypt bool, buf []byte) error {
+    var (
+        size int64
+        body io.Reader
+    )
+    if len(data) >= 1 && data[0] == '@' {
+        fr, err := os.Open(data[1:])
+        if err != nil {
+            return err
+        }
+        defer fr.Close()
+
+        fi, err := fr.Stat()
+        if err != nil {
+            return err
+        }
+        size, body = fi.Size(), fr
+    } else {
+        sr := strings.NewReader(data)
+        size, body = sr.Size(), sr
+    }
+
+    req, err := http.NewRequest(http.MethodPost, url, body)
+    if err != nil {
+        return err
+    }
+    req.Header.Set(headerType, urlencoded)
+    req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
+
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return err
+    }
+    if resp.Body != nil {
+        _, err = io.CopyBuffer(os.Stdout, resp.Body, buf)
+        resp.Body.Close()
+    }
+    return err
+}
+
+// http get客户端,支持断点下载
+func clientGet(url, output string, encrypt bool, buf []byte) error {
+    req, err := http.NewRequest(http.MethodGet, url, nil)
+    if err != nil {
+        return err
+    }
+    if output == "" {
+        output = filepath.Base(req.URL.Path)
+    }
+
+    var (
+        size int64
+        fw   io.WriteCloser
+    )
+    fi, err := os.Stat(output)
+    if err == nil {
+        if fi.IsDir() {
+            return errors.New(output + "is dir")
+        }
+        size = fi.Size()
+        fw, err = os.OpenFile(output, os.O_APPEND, 0666)
+    } else {
+        fw, err = os.Create(output)
+    }
+    if err != nil {
+        return err
+    }
+    defer fw.Close()
+
+    if size > 0 { // 本地文件已存在,上传范围,请求断点续传
+        req.Header.Set("Range", "bytes="+string(strconv.AppendInt(buf[:0], size, 10))+"-")
+    }
+
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return err
+    }
+    if resp.Body == nil {
+        return errors.New("body is null")
+    }
+    defer resp.Body.Close()
+
+    switch resp.StatusCode {
+    case http.StatusOK, http.StatusPartialContent: // 完整接收,断点续传
+    case http.StatusRequestedRangeNotSatisfiable:
+        size, _ = io.CopyBuffer(ioutil.Discard, resp.Body, buf)
+        fmt.Printf("[%d bytes data]\n", size) // 已经下载完毕
+        return nil
+    default:
+        return errors.New(strconv.Itoa(resp.StatusCode) + "not support")
+    }
+
+    size, err = strconv.ParseInt(resp.Header.Get(headerLength), 10, 0)
+    if err != nil {
+        return err
+    }
+
+    pw := handleWriteData(fw, nil, "GET >"+output, size)
+    _, err = io.CopyBuffer(pw, resp.Body, buf)
+    pw.Close()
+    return err
+}
 
 /*--------------------------------下面是工具类---------------------------------*/
 const (
@@ -374,10 +503,12 @@ type progress struct {
 
     writeHeader func(int)
     write       func([]byte) (int, error)
+
+    cipher cipher.Stream
 }
 
-func newProgress(w interface{}, prefix string, size int64) *progress {
-    p := &progress{rate: make(chan int64)}
+func handleWriteData(w interface{}, c cipher.Stream, prefix string, size int64) *progress {
+    p := &progress{rate: make(chan int64), cipher: c}
     switch pw := w.(type) {
     case http.ResponseWriter:
         p.header, p.writeHeader, p.write = pw.Header(), pw.WriteHeader, pw.Write
@@ -406,6 +537,9 @@ func (p *progress) WriteHeader(code int) {
     }
 }
 func (p *progress) Write(b []byte) (n int, err error) {
+    if p.cipher != nil {
+        p.cipher.XORKeyStream(b, b)
+    }
     n, err = p.write(b)
     p.cnt += int64(n)
     select {
@@ -439,3 +573,5 @@ func convertByte(buf []byte, b int64) []byte {
     }
     return append(strconv.AppendFloat(buf, tmp, 'f', 2, 64), unit...)
 }
+
+/*--------------------------------加密工具类---------------------------------*/
