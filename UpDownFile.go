@@ -3,7 +3,9 @@ package main
 import (
     "bytes"
     "compress/zlib"
+    "crypto/aes"
     "crypto/cipher"
+    "crypto/rand"
     "encoding/base64"
     "errors"
     "flag"
@@ -42,7 +44,7 @@ func main() {
     var addrStr string
     flag.StringVar(&basePath, "p", ".", "path")
     flag.StringVar(&addrStr, "s", ":8080", "ip:port")
-    flag.BoolVar(&useEncrypt, "e", false, "encrypt data")
+    flag.StringVar(&useEncrypt, "e", "pass", "encrypt data")
     flag.Parse()
 
     addr, err := net.Listen("tcp", addrStr)
@@ -86,11 +88,11 @@ var (
         data []byte
     }
     basePath   string
-    useEncrypt bool
+    useEncrypt string
 )
 
 func faviconIco(w http.ResponseWriter, _ *http.Request) {
-    icoData.Do(func() {
+    icoData.Do(func() { // ico图标嵌入代码
         const ico = "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"
         zr, _ := zlib.NewReader(base64.NewDecoder(base64.RawStdEncoding, strings.NewReader(ico)))
         data := bytes.NewBuffer(make([]byte, 0, 27206))
@@ -102,12 +104,12 @@ func faviconIco(w http.ResponseWriter, _ *http.Request) {
 }
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
-    var err error
-    buf := bytePool.Get().([]byte)
+    var (
+        err error
+        buf = bytePool.Get().([]byte)
+    )
     defer bytePool.Put(buf)
     switch r.Method {
-    case http.MethodHead:
-        err = handleHeadFile(w, r, buf)
     case http.MethodGet:
         err = handleGetFile(w, r, buf)
     case http.MethodPost:
@@ -123,19 +125,35 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
     }
 }
 
+func httpGetStream(key string) (Stream, error) {
+    if useEncrypt != "" { // 服务器启用秘钥
+        return newDecrypt(key)
+    }
+    if key != "" { // 未启用秘钥时,客户端发送了秘钥则提示不支持
+        return nil, errors.New("server not support encrypt data")
+    }
+    return nil, nil
+}
+
 func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     var (
         path string
         size int64
         fr   io.ReadCloser
+
+        fileFlag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
     )
     if r.Header.Get(headerType) == urlencoded {
         s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
-        if err != nil { // headerLength在使用golang的http.post时会被去掉
+        if err != nil { // go库会删掉headerLength
             s, err = strconv.ParseInt(r.Header.Get(janbarLength), 10, 0)
             if err != nil {
                 return err
             }
+        }
+        // 服务器收到客户端是断点上传的文件
+        if r.Header.Get("point") == "true" {
+            fileFlag = os.O_CREATE | os.O_APPEND
         }
         fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
     } else {
@@ -147,14 +165,21 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     }
     defer fr.Close()
 
-    fw, err := os.Create(path)
+    fw, err := os.OpenFile(path, fileFlag, 0666)
     if err != nil {
         return err
     }
 
-    pw := handleWriteData(fw, nil, "POST>"+path, size)
+    c, err := httpGetStream(r.Header.Get(encryptFlag))
+    if err != nil {
+        return err
+    }
+    pw := handleWriteReadData(&handleData{
+        handle: fw.Write,
+        cipher: c,
+    }, "POST>"+path, size)
     _, err = io.CopyBuffer(pw, fr, buf)
-    fw.Close() // 趁早写入文件
+    fw.Close() // 趁早刷新缓存
     pw.Close()
     if err != nil {
         return err
@@ -167,13 +192,19 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     path := filepath.Join(basePath, r.URL.Path)
     fi, err := os.Stat(path)
     if err != nil {
+        w.WriteHeader(http.StatusNotFound)
         return err
     }
 
+    isHead := r.Header.Get("head") == "true"
     if fi.IsDir() {
-        if useEncrypt { // 加密方式不支持浏览目录,懒得写前端代码
+        if isHead { // 不支持查看目录的大小信息
+            return errors.New("head not support list dir")
+        }
+        if useEncrypt != "" { // 加密方式不支持浏览目录,懒得写前端代码
             return errors.New("encrypt method not support list dir")
         }
+
         tmpInt, _ := strconv.Atoi(r.FormValue("sort"))
         if tmpInt < 0 || tmpInt > 5 {
             tmpInt = 0
@@ -213,10 +244,22 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
             w.Write(htmlAtdTr)
         }
         w.Write(htmlSuffix)
+    } else if isHead { // 返回服务器当前文件大小,用于断点上传,可用curl进行断点上传
+        size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
+        w.Header().Set(janbarLength, size)
+        w.Write([]byte("curl -C " + size + " --data-binary @file url\n"))
     } else {
-        pw := handleWriteData(w, nil, "GET >"+path, fi.Size())
-        if useEncrypt {
+        c, err := httpGetStream(r.Header.Get(encryptFlag))
+        if err != nil {
+            return err
         }
+        pw := handleWriteReadData(&handleData{
+            handle:      w.Write,
+            header:      w.Header(),
+            writeHeader: w.WriteHeader,
+            cipher:      c,
+        }, "GET >"+path, fi.Size())
+        // 使用go库的文件服务器,支持断点续传,以及各种处理
         http.ServeFile(pw, r, path)
         pw.Close()
     }
@@ -241,7 +284,7 @@ var (
 <p><label><input type="radio" name="sort" onclick="sortDir(0)">名称升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">名称降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>
-<p><input type="file" id="file"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
+<p><input type="file" id="file"></p><handleData value="0" id="handleData"></handleData><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
 <a href="#top" style="margin:5px">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
     htmlSuffix = []byte(`</table><a name="bottom"></a><script>
 function uploadFile() {
@@ -269,10 +312,10 @@ function uploadFile() {
             }
         }
     }
-    let progress = document.getElementById('progress')
+    let handleData = document.getElementById('handleData')
     xhr.upload.onprogress = function (e) {
-        progress.value = e.loaded
-        progress.max = e.total
+        handleData.value = e.loaded
+        handleData.max = e.total
     }
     xhr.open('POST', window.location.pathname, true)
     xhr.send(params)
@@ -296,7 +339,8 @@ func clientMain() error {
     httpUrl := fs.String("u", "", "http url")
     data := fs.String("d", "", "post data")
     output := fs.String("o", "", "output")
-    encrypt := fs.Bool("e", false, "encrypt data")
+    point := fs.Bool("c", false, "Resumed transfer offset")
+    fs.StringVar(&useEncrypt, "e", "", "encrypt data")
     fs.Parse(os.Args[2:])
 
     if *httpUrl == "" {
@@ -306,18 +350,48 @@ func clientMain() error {
     buf := bytePool.Get().([]byte)
     defer bytePool.Put(buf)
     if *data != "" {
-        return clientPost(*data, *httpUrl, *encrypt, buf)
+        return clientPost(*data, *httpUrl, *point, buf)
     }
-    return clientGet(*httpUrl, *output, *encrypt, buf)
+    return clientGet(*httpUrl, *output, *point, buf)
 }
 
-func clientPost(data, url string, encrypt bool, buf []byte) error {
+func clientHead(url string) (int64, error) {
+    req, err := http.NewRequest(http.MethodGet, url, nil)
+    if err != nil {
+        return 0, err
+    }
+    req.Header.Set("head", "true")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return 0, err
+    }
+    defer resp.Body.Close()
+    if resp.StatusCode == http.StatusNotFound {
+        return 0, nil // 服务器没有文件
+    }
+    return strconv.ParseInt(resp.Header.Get(janbarLength), 10, 0)
+}
+
+// http post客户端,支持断点上传
+func clientPost(data, url string, point bool, buf []byte) error {
     var (
         size int64
+        key  string
+        path string
         body io.Reader
+        c    Stream
+        err  error
     )
     if len(data) >= 1 && data[0] == '@' {
-        fr, err := os.Open(data[1:])
+        if point { // 断点上传
+            size, err = clientHead(url)
+            if err != nil {
+                return err
+            }
+        }
+
+        path = data[1:]
+        fr, err := os.Open(path)
         if err != nil {
             return err
         }
@@ -327,18 +401,47 @@ func clientPost(data, url string, encrypt bool, buf []byte) error {
         if err != nil {
             return err
         }
-        size, body = fi.Size(), fr
+        if size == fi.Size() {
+            return errors.New("file upload is complete")
+        }
+
+        if size > 0 {
+            _, err = fr.Seek(size, io.SeekStart)
+            if err != nil {
+                return err
+            }
+        }
+        size, body = fi.Size()-size, fr
     } else {
         sr := strings.NewReader(data)
-        size, body = sr.Size(), sr
+        size, path, body = sr.Size(), "string data", sr
     }
 
-    req, err := http.NewRequest(http.MethodPost, url, body)
+    if useEncrypt != "" { // 加密上传数据
+        key, c, err = newEncrypt(buf)
+        if err != nil {
+            return err
+        }
+    }
+
+    pr := handleWriteReadData(&handleData{
+        handle: body.Read,
+        cipher: c,
+    }, "POST>"+path, size)
+    defer pr.Close()
+
+    req, err := http.NewRequest(http.MethodPost, url, pr)
     if err != nil {
         return err
     }
     req.Header.Set(headerType, urlencoded)
     req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
+    if point { // 告诉服务器断点续传的上传数据
+        req.Header.Set("point", "true")
+    }
+    if key != "" {
+        req.Header.Set(encryptFlag, key)
+    }
 
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
@@ -352,7 +455,7 @@ func clientPost(data, url string, encrypt bool, buf []byte) error {
 }
 
 // http get客户端,支持断点下载
-func clientGet(url, output string, encrypt bool, buf []byte) error {
+func clientGet(url, output string, point bool, buf []byte) error {
     req, err := http.NewRequest(http.MethodGet, url, nil)
     if err != nil {
         return err
@@ -361,27 +464,31 @@ func clientGet(url, output string, encrypt bool, buf []byte) error {
         output = filepath.Base(req.URL.Path)
     }
 
-    var (
-        size int64
-        fw   io.WriteCloser
-    )
+    fileFlag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
     fi, err := os.Stat(output)
     if err == nil {
         if fi.IsDir() {
             return errors.New(output + "is dir")
         }
-        size = fi.Size()
-        fw, err = os.OpenFile(output, os.O_APPEND, 0666)
-    } else {
-        fw, err = os.Create(output)
+        if point { // 断点续传
+            fileFlag = os.O_APPEND
+            req.Header.Set("Range", "bytes="+string(strconv.AppendInt(buf[:0], fi.Size(), 10))+"-")
+        }
     }
+    fw, err := os.OpenFile(output, fileFlag, 0666)
     if err != nil {
         return err
     }
     defer fw.Close()
 
-    if size > 0 { // 本地文件已存在,上传范围,请求断点续传
-        req.Header.Set("Range", "bytes="+string(strconv.AppendInt(buf[:0], size, 10))+"-")
+    var c Stream
+    if useEncrypt != "" { // 客户端将随机秘钥发到服务器
+        var key string
+        key, c, err = newEncrypt(buf)
+        if err != nil {
+            return err
+        }
+        req.Header.Set(encryptFlag, key)
     }
 
     resp, err := http.DefaultClient.Do(req)
@@ -393,6 +500,7 @@ func clientGet(url, output string, encrypt bool, buf []byte) error {
     }
     defer resp.Body.Close()
 
+    var size int64
     switch resp.StatusCode {
     case http.StatusOK, http.StatusPartialContent: // 完整接收,断点续传
     case http.StatusRequestedRangeNotSatisfiable:
@@ -400,7 +508,7 @@ func clientGet(url, output string, encrypt bool, buf []byte) error {
         fmt.Printf("[%d bytes data]\n", size) // 已经下载完毕
         return nil
     default:
-        return errors.New(strconv.Itoa(resp.StatusCode) + "not support")
+        return errors.New(strconv.Itoa(resp.StatusCode) + " not support")
     }
 
     size, err = strconv.ParseInt(resp.Header.Get(headerLength), 10, 0)
@@ -408,7 +516,10 @@ func clientGet(url, output string, encrypt bool, buf []byte) error {
         return err
     }
 
-    pw := handleWriteData(fw, nil, "GET >"+output, size)
+    pw := handleWriteReadData(&handleData{
+        handle: fw.Write,
+        cipher: c,
+    }, "GET >"+output, size)
     _, err = io.CopyBuffer(pw, resp.Body, buf)
     pw.Close()
     return err
@@ -433,12 +544,17 @@ type (
 )
 
 func sortDir(dir string, sortType sortDirType) ([]os.FileInfo, error) {
-    fi, err := ioutil.ReadDir(dir)
+    f, err := os.Open(dir)
     if err != nil {
         return nil, err
     }
-    sort.Sort(&dirInfoSort{fi: fi, sortType: sortType})
-    return fi, nil
+    list, err := f.Readdir(-1)
+    f.Close()
+    if err != nil {
+        return nil, err
+    }
+    sort.Sort(&dirInfoSort{fi: list, sortType: sortType})
+    return list, nil
 }
 
 func (d *dirInfoSort) Len() int {
@@ -496,59 +612,72 @@ func (d *dirInfoSort) Swap(x, y int) {
     d.fi[x], d.fi[y] = d.fi[y], d.fi[x]
 }
 
-type progress struct {
-    cnt    int64
-    rate   chan int64
-    header http.Header
+type handleData struct {
+    cnt      int64
+    rate     chan int64
+    header   http.Header
+    buf, tmp []byte
+    cipher   Stream
 
     writeHeader func(int)
-    write       func([]byte) (int, error)
-
-    cipher cipher.Stream
+    handle      func([]byte) (int, error)
 }
 
-func handleWriteData(w interface{}, c cipher.Stream, prefix string, size int64) *progress {
-    p := &progress{rate: make(chan int64), cipher: c}
-    switch pw := w.(type) {
-    case http.ResponseWriter:
-        p.header, p.writeHeader, p.write = pw.Header(), pw.WriteHeader, pw.Write
-    case io.Writer:
-        p.write = pw.Write
-    default:
-        return nil
-    }
-
-    cnt := 0
-    for tmp := size; tmp > 0; tmp /= 10 {
-        cnt++
-    }
+func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
+    p.rate = make(chan int64)
+    p.buf = bytePool.Get().([]byte)
     go func(rate <-chan int64, format string, size int64) {
         for cur := range rate {
-            fmt.Printf(format, cur)
+            fmt.Printf(format, cur*100/size)
         }
-        fmt.Printf(format+"\r\n", size)
-    }(p.rate, fmt.Sprintf("\r%s [%%%dd - %d]", prefix, cnt, size), size)
+        fmt.Printf(format+"\r\n", 100)
+    }(p.rate, "\r"+prefix+" %3d%%", size)
     return p
 }
-func (p *progress) Header() http.Header { return p.header }
-func (p *progress) WriteHeader(code int) {
+
+func (p *handleData) Header() http.Header { return p.header }
+func (p *handleData) WriteHeader(code int) {
     if p.writeHeader != nil {
         p.writeHeader(code)
     }
 }
-func (p *progress) Write(b []byte) (n int, err error) {
-    if p.cipher != nil {
-        p.cipher.XORKeyStream(b, b)
-    }
-    n, err = p.write(b)
+func (p *handleData) add(n int) {
     p.cnt += int64(n)
     select {
     case p.rate <- p.cnt:
     default:
     }
+}
+func (p *handleData) Write(b []byte) (n int, err error) {
+    if p.cipher != nil {
+        p.tmp = genByte(p.buf, len(b))
+        p.cipher.XORKeyStream(p.tmp, b)
+        n, err = p.handle(p.tmp)
+    } else {
+        n, err = p.handle(b)
+    }
+    p.add(n)
     return
 }
-func (p *progress) Close() { close(p.rate) }
+func (p *handleData) Read(b []byte) (n int, err error) {
+    if p.cipher != nil {
+        p.tmp = genByte(p.buf, len(b))
+        if n, err = p.handle(p.tmp); n > 0 {
+            p.cipher.XORKeyStream(b[:n], p.tmp[:n])
+        }
+    } else {
+        n, err = p.handle(b)
+    }
+    p.add(n)
+    return
+}
+func (p *handleData) Close() {
+    bytePool.Put(p.buf)
+    if p.cipher != nil {
+        p.cipher.Close()
+    }
+    close(p.rate)
+}
 
 var unitByte = []struct {
     byte float64
@@ -574,4 +703,137 @@ func convertByte(buf []byte, b int64) []byte {
     return append(strconv.AppendFloat(buf, tmp, 'f', 2, 64), unit...)
 }
 
+// 缓存够就用缓存,缓存不够产生新的对象
+func genByte(buf []byte, n int) []byte {
+    tmp := buf
+    if n > len(tmp) {
+        return make([]byte, n)
+    }
+    return tmp[:n]
+}
+
 /*--------------------------------加密工具类---------------------------------*/
+// 我下面只使用最简单的rc4加密,实现下面两个接口可以自定义任意加密方式
+type Stream interface {
+    XORKeyStream(dst, src []byte)
+    Close()
+}
+
+// 生成随机秘钥,并返回加密对象
+func newEncrypt(buf []byte) (string, Stream, error) {
+    tmp := genByte(buf, 30)
+    _, err := rand.Read(tmp)
+    if err != nil {
+        return "", nil, err
+    }
+
+    dst := genByte(buf[64:], 32)
+    tmp = append(tmp, calcCrc(tmp[:30])...) // 存入2byte的crc
+    err = encryptKey(dst, tmp)
+    if err != nil {
+        return "", nil, err
+    }
+    key := base64.StdEncoding.EncodeToString(dst)
+    return key, newRc4Cipher(tmp), nil
+}
+
+// 根据秘钥返回解密对象
+func newDecrypt(key string) (Stream, error) {
+    if key == "" {
+        return nil, errors.New("key is empty")
+    }
+    buf, err := base64.StdEncoding.DecodeString(key)
+    if err != nil {
+        return nil, err
+    }
+    dst := make([]byte, len(buf))
+    err = encryptKey(dst, buf)
+    if err != nil {
+        return nil, err
+    }
+    if len(dst) == 32 {
+        crc := calcCrc(dst[:30])
+        if crc[0] == dst[30] && crc[1] == dst[31] {
+            return newRc4Cipher(dst), nil
+        }
+    }
+    return nil, errors.New("key decrypt error")
+}
+
+func calcCrc(buf []byte) []byte {
+    c := uint16(0xffff)
+    for _, v := range buf {
+        c ^= uint16(v)
+        for i := 0; i < 8; i++ {
+            if (c & 1) == 1 {
+                c = (c >> 1) ^ 0xa001
+            } else {
+                c >>= 1
+            }
+        }
+    }
+    return []byte{byte(c & 0xff), byte(c >> 8)}
+}
+
+func encryptKey(dst, src []byte) error {
+    var (
+        n, kLen = 0, 32
+        tmp     = genByte(dst, kLen)
+    )
+    for n < kLen {
+        n += copy(tmp[n:], useEncrypt)
+    }
+    block, err := aes.NewCipher(tmp)
+    if err != nil {
+        return err
+    }
+    n, kLen = 0, block.BlockSize()
+    tmp = genByte(dst, kLen)
+    for n < kLen {
+        n += copy(tmp[n:], useEncrypt)
+    }
+    cipher.NewCTR(block, tmp).XORKeyStream(dst, src)
+    return nil
+}
+
+type rc4Cipher struct {
+    s    [256]uint32
+    l    int
+    x, y uint32
+
+    i, j, i0, j0, tmp uint8
+}
+
+var rc4Pool = &sync.Pool{New: func() interface{} {
+    return new(rc4Cipher)
+}}
+
+func newRc4Cipher(key []byte) Stream {
+    c := rc4Pool.Get().(*rc4Cipher)
+    for i := uint32(0); i < 256; i++ {
+        c.s[i] = i
+    }
+    // 初始变量需要做好赋值
+    c.i, c.j, c.j0, c.l = 0, 0, 0, len(key)
+    for i := 0; i < 256; i++ {
+        c.j0 += uint8(c.s[i]) + key[i%c.l]
+        c.s[i], c.s[c.j0] = c.s[c.j0], c.s[i]
+    }
+    c.tmp = uint8(c.s[key[0]])
+    return c
+}
+
+func (c *rc4Cipher) XORKeyStream(dst, src []byte) {
+    c.i0, c.j0 = c.i, c.j
+    for k, v := range src {
+        c.i0++
+        c.x = c.s[c.i0]
+        c.j0 += uint8(c.x)
+        c.y = c.s[c.j0]
+        c.s[c.i0], c.s[c.j0] = c.y, c.x
+        dst[k] = v ^ uint8(c.s[uint8(c.x+c.y)]) ^ c.tmp
+    }
+    c.i, c.j = c.i0, c.j0
+}
+
+func (c *rc4Cipher) Close() { rc4Pool.Put(c) }
