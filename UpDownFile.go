@@ -21,7 +21,6 @@ import (
     "strconv"
     "strings"
     "sync"
-    "sync/atomic"
     "time"
 )
 
@@ -306,7 +305,7 @@ var (
 <p><label><input type="radio" name="sort" onclick="sortDir(0)">名称升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">名称降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>
-<p><input type="file" id="file"></p><handleData value="0" id="handleData"></handleData><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
+<p><input type="file" id="file"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
 <a href="#top" style="margin:5px">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
     htmlSuffix = []byte(`</table><a name="bottom"></a><script>
 function uploadFile() {
@@ -334,10 +333,10 @@ function uploadFile() {
             }
         }
     }
-    let handleData = document.getElementById('handleData')
+    let progress = document.getElementById('progress')
     xhr.upload.onprogress = function (e) {
-        handleData.value = e.loaded
-        handleData.max = e.total
+        progress.value = e.loaded
+        progress.max = e.total
     }
     xhr.open('POST', window.location.pathname, true)
     xhr.send(params)
@@ -451,10 +450,10 @@ func clientPost(data, url string, point bool, buf []byte) error {
         handle: body.Read,
         cipher: c,
     }, "POST>"+path, size)
+    defer pr.Close()
 
     req, err := http.NewRequest(http.MethodPost, url, pr)
     if err != nil {
-        pr.Close()
         return err
     }
     req.Header.Set(headerType, urlencoded)
@@ -470,17 +469,9 @@ func clientPost(data, url string, point bool, buf []byte) error {
     if err != nil {
         return err
     }
-
-    out := bytes.NewBuffer(buf[:0])
     if resp.Body != nil {
-        io.CopyBuffer(out, resp.Body, buf[1024:])
+        io.CopyBuffer(os.Stdout, resp.Body, buf[1024:])
         resp.Body.Close()
-    }
-
-    pr.Close()
-    if resp.StatusCode != http.StatusOK {
-        // 下面的操作都是为了在出错时删除prefix的打印
-        fmt.Printf("\r%s\n", out.String())
     }
     return nil
 }
@@ -651,7 +642,6 @@ type handleData struct {
     header   http.Header
     buf, tmp []byte
     cipher   Stream
-    isRun    int32
 
     writeHeader func(int)
     handle      func([]byte) (int, error)
@@ -661,11 +651,10 @@ func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
     p.rate = make(chan int64)
     p.buf = bytePool.Get().([]byte)
     go func(rate <-chan int64, format string, size int64) {
-        fmt.Println()
         for cur := range rate {
             fmt.Printf(format, cur*100/size)
         }
-        fmt.Printf(format, 100)
+        fmt.Printf(format+"\n", 100)
     }(p.rate, "\r"+prefix+" %3d%%", size)
     return p
 }
@@ -677,12 +666,10 @@ func (p *handleData) WriteHeader(code int) {
     }
 }
 func (p *handleData) add(n int) {
-    if atomic.LoadInt32(&p.isRun) == 0 {
-        p.cnt += int64(n)
-        select {
-        case p.rate <- p.cnt:
-        default:
-        }
+    p.cnt += int64(n)
+    select {
+    case p.rate <- p.cnt:
+    default:
     }
 }
 func (p *handleData) Write(b []byte) (n int, err error) {
@@ -709,15 +696,9 @@ func (p *handleData) Read(b []byte) (n int, err error) {
     return
 }
 func (p *handleData) Close() {
-    if atomic.CompareAndSwapInt32(&p.isRun, 0, 1) {
-        bytePool.Put(p.buf)
-        if p.cipher != nil {
-            p.cipher.Close()
-        }
-        close(p.rate)
-        // 等打印协程打印完
-        time.Sleep(time.Nanosecond)
-    }
+    bytePool.Put(p.buf)
+    close(p.rate)
+    time.Sleep(time.Nanosecond) // 等打印协程打印完
 }
 
 var unitByte = []struct {
@@ -754,10 +735,9 @@ func genByte(buf []byte, n int) []byte {
 }
 
 /*--------------------------------加密工具类---------------------------------*/
-// 我下面只使用最简单的rc4加密,实现下面两个接口可以自定义任意加密方式
+// 我下面只使用最简单的rc4加密,实现下面接口可以自定义任意加密方式
 type Stream interface {
     XORKeyStream(dst, src []byte)
-    Close()
 }
 
 // 生成随机秘钥,并返回加密对象
@@ -843,12 +823,8 @@ type rc4Cipher struct {
     i, j, i0, j0, tmp uint8
 }
 
-var rc4Pool = &sync.Pool{New: func() interface{} {
-    return new(rc4Cipher)
-}}
-
 func newRc4Cipher(key []byte) Stream {
-    c := rc4Pool.Get().(*rc4Cipher)
+    c := new(rc4Cipher)
     for i := uint32(0); i < 256; i++ {
         c.s[i] = i
     }
@@ -874,5 +850,3 @@ func (c *rc4Cipher) XORKeyStream(dst, src []byte) {
     }
     c.i, c.j = c.i0, c.j0
 }
-
-func (c *rc4Cipher) Close() { rc4Pool.Put(c) }
