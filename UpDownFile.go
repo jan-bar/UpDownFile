@@ -21,6 +21,7 @@ import (
     "strconv"
     "strings"
     "sync"
+    "sync/atomic"
     "time"
 )
 
@@ -44,7 +45,7 @@ func main() {
     var addrStr string
     flag.StringVar(&basePath, "p", ".", "path")
     flag.StringVar(&addrStr, "s", ":8080", "ip:port")
-    flag.StringVar(&useEncrypt, "e", "pass", "encrypt data")
+    flag.StringVar(&useEncrypt, "e", "", "encrypt data")
     flag.Parse()
 
     addr, err := net.Listen("tcp", addrStr)
@@ -60,8 +61,28 @@ func main() {
         return
     }
 
-    fmt.Printf(`dir [%s],url [http://%s/]
+    fmt.Printf("dir [%s],url [http://%s/]\n\n", basePath, addrStr)
 
+    if useEncrypt == "" {
+        fmt.Printf(`server:
+    %s -s %s -p %s
+cli get:
+    %s cli -u "http://%s/dir/tmp.txt" -c
+cli post:
+    %s cli -d @C:\tmp.txt -u "http://%s/dir/tmp.txt" -c
+`, os.Args[0], addrStr, basePath, os.Args[0], addrStr, os.Args[0], addrStr)
+    } else {
+        fmt.Printf(`server:
+    %s -s %s -p %s -e %s
+cli get:
+    %s cli -u "http://%s/dir/tmp.txt" -c -e %s
+cli post:
+    %s cli -d @C:\tmp.txt -u "http://%s/dir/tmp.txt" -c -e %s
+`, os.Args[0], addrStr, basePath, useEncrypt, os.Args[0],
+            addrStr, useEncrypt, os.Args[0], addrStr, useEncrypt)
+    }
+
+    fmt.Printf(`
 GET file:
     wget -c --content-disposition "http://%s/dir/tmp.txt"
     curl -C - -OJ "http://%s/dir/tmp.txt"
@@ -69,7 +90,7 @@ POST file:
     wget -qO - --post-file=C:\tmp.txt "http://%s/dir/tmp.txt"
     curl --data-binary @C:\tmp.txt "http://%s/dir/tmp.txt"
     curl -F "file=@C:\tmp.txt" "http://%s/dir/"
-`, basePath, addrStr, addrStr, addrStr, addrStr, addrStr, addrStr)
+`, addrStr, addrStr, addrStr, addrStr, addrStr)
 
     http.HandleFunc("/", upDownFile)
     http.HandleFunc("/favicon.ico", faviconIco)
@@ -118,6 +139,7 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
         err = errors.New(r.Method + " not support")
     }
     if err != nil {
+        w.WriteHeader(http.StatusInternalServerError)
         w.Header().Set(headerType, "text/html;charset=utf-8")
         w.Write(htmlMsgPrefix)
         w.Write([]byte(err.Error()))
@@ -355,6 +377,7 @@ func clientMain() error {
     return clientGet(*httpUrl, *output, *point, buf)
 }
 
+// 获取服务器文件大小,主要用于断点上传功能
 func clientHead(url string) (int64, error) {
     req, err := http.NewRequest(http.MethodGet, url, nil)
     if err != nil {
@@ -428,10 +451,10 @@ func clientPost(data, url string, point bool, buf []byte) error {
         handle: body.Read,
         cipher: c,
     }, "POST>"+path, size)
-    defer pr.Close()
 
     req, err := http.NewRequest(http.MethodPost, url, pr)
     if err != nil {
+        pr.Close()
         return err
     }
     req.Header.Set(headerType, urlencoded)
@@ -447,11 +470,19 @@ func clientPost(data, url string, point bool, buf []byte) error {
     if err != nil {
         return err
     }
+
+    out := bytes.NewBuffer(buf[:0])
     if resp.Body != nil {
-        _, err = io.CopyBuffer(os.Stdout, resp.Body, buf)
+        io.CopyBuffer(out, resp.Body, buf[1024:])
         resp.Body.Close()
     }
-    return err
+
+    pr.Close()
+    if resp.StatusCode != http.StatusOK {
+        // 下面的操作都是为了在出错时删除prefix的打印
+        fmt.Printf("\r%s\n", out.String())
+    }
+    return nil
 }
 
 // http get客户端,支持断点下载
@@ -508,7 +539,9 @@ func clientGet(url, output string, point bool, buf []byte) error {
         fmt.Printf("[%d bytes data]\n", size) // 已经下载完毕
         return nil
     default:
-        return errors.New(strconv.Itoa(resp.StatusCode) + " not support")
+        fmt.Printf("StatusCode:%d\n", resp.StatusCode)
+        io.CopyBuffer(os.Stdout, resp.Body, buf)
+        return nil // 打印错误
     }
 
     size, err = strconv.ParseInt(resp.Header.Get(headerLength), 10, 0)
@@ -618,6 +651,7 @@ type handleData struct {
     header   http.Header
     buf, tmp []byte
     cipher   Stream
+    isRun    int32
 
     writeHeader func(int)
     handle      func([]byte) (int, error)
@@ -627,10 +661,11 @@ func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
     p.rate = make(chan int64)
     p.buf = bytePool.Get().([]byte)
     go func(rate <-chan int64, format string, size int64) {
+        fmt.Println()
         for cur := range rate {
             fmt.Printf(format, cur*100/size)
         }
-        fmt.Printf(format+"\r\n", 100)
+        fmt.Printf(format, 100)
     }(p.rate, "\r"+prefix+" %3d%%", size)
     return p
 }
@@ -642,10 +677,12 @@ func (p *handleData) WriteHeader(code int) {
     }
 }
 func (p *handleData) add(n int) {
-    p.cnt += int64(n)
-    select {
-    case p.rate <- p.cnt:
-    default:
+    if atomic.LoadInt32(&p.isRun) == 0 {
+        p.cnt += int64(n)
+        select {
+        case p.rate <- p.cnt:
+        default:
+        }
     }
 }
 func (p *handleData) Write(b []byte) (n int, err error) {
@@ -672,11 +709,15 @@ func (p *handleData) Read(b []byte) (n int, err error) {
     return
 }
 func (p *handleData) Close() {
-    bytePool.Put(p.buf)
-    if p.cipher != nil {
-        p.cipher.Close()
+    if atomic.CompareAndSwapInt32(&p.isRun, 0, 1) {
+        bytePool.Put(p.buf)
+        if p.cipher != nil {
+            p.cipher.Close()
+        }
+        close(p.rate)
+        // 等打印协程打印完
+        time.Sleep(time.Nanosecond)
     }
-    close(p.rate)
 }
 
 var unitByte = []struct {
@@ -721,16 +762,15 @@ type Stream interface {
 
 // 生成随机秘钥,并返回加密对象
 func newEncrypt(buf []byte) (string, Stream, error) {
-    tmp := genByte(buf, 30)
-    _, err := rand.Read(tmp)
+    tmp := genByte(buf, 32)
+    _, err := rand.Read(tmp[2:])
     if err != nil {
         return "", nil, err
     }
+    tmp[0], tmp[1] = calcCrc(tmp[2:]) // 存入2byte的crc
 
     dst := genByte(buf[64:], 32)
-    tmp = append(tmp, calcCrc(tmp[:30])...) // 存入2byte的crc
-    err = encryptKey(dst, tmp)
-    if err != nil {
+    if err = encryptKey(dst, tmp); err != nil {
         return "", nil, err
     }
     key := base64.StdEncoding.EncodeToString(dst)
@@ -747,20 +787,19 @@ func newDecrypt(key string) (Stream, error) {
         return nil, err
     }
     dst := make([]byte, len(buf))
-    err = encryptKey(dst, buf)
-    if err != nil {
+    if err = encryptKey(dst, buf); err != nil {
         return nil, err
     }
     if len(dst) == 32 {
-        crc := calcCrc(dst[:30])
-        if crc[0] == dst[30] && crc[1] == dst[31] {
+        c0, c1 := calcCrc(dst[2:])
+        if c0 == dst[0] && c1 == dst[1] {
             return newRc4Cipher(dst), nil
         }
     }
     return nil, errors.New("key decrypt error")
 }
 
-func calcCrc(buf []byte) []byte {
+func calcCrc(buf []byte) (byte, byte) {
     c := uint16(0xffff)
     for _, v := range buf {
         c ^= uint16(v)
@@ -772,7 +811,7 @@ func calcCrc(buf []byte) []byte {
             }
         }
     }
-    return []byte{byte(c & 0xff), byte(c >> 8)}
+    return byte(c), byte(c >> 8)
 }
 
 func encryptKey(dst, src []byte) error {
