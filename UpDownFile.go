@@ -29,6 +29,8 @@ const (
     encryptFlag  = "encrypt"
     headerLength = "Content-Length"
     janbarLength = "Janbar-Length"
+    headMethod   = "head"
+    headPoint    = "point"
     headerType   = "Content-Type"
     urlencoded   = "application/x-www-form-urlencoded"
 )
@@ -146,7 +148,7 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-func httpGetStream(key string) (Stream, error) {
+func httpGetStream(key string) (cipher.Stream, error) {
     if useEncrypt != "" { // 服务器启用秘钥
         return newDecrypt(key)
     }
@@ -164,6 +166,14 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 
         fileFlag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
     )
+    c, err := httpGetStream(r.Header.Get(encryptFlag))
+    if err != nil {
+        return err
+    }
+    if c != nil && r.Header.Get(headMethod) == "check" {
+        return nil // 告诉客户端秘钥有效
+    }
+
     if r.Header.Get(headerType) == urlencoded {
         s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
         if err != nil { // go库会删掉headerLength
@@ -173,7 +183,7 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
             }
         }
         // 服务器收到客户端是断点上传的文件
-        if r.Header.Get("point") == "true" {
+        if r.Header.Get(headPoint) == "true" {
             fileFlag = os.O_CREATE | os.O_APPEND
         }
         fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
@@ -191,10 +201,6 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         return err
     }
 
-    c, err := httpGetStream(r.Header.Get(encryptFlag))
-    if err != nil {
-        return err
-    }
     pw := handleWriteReadData(&handleData{
         handle: fw.Write,
         cipher: c,
@@ -217,9 +223,9 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         return err
     }
 
-    isHead := r.Header.Get("head") == "true"
+    headStr := r.Header.Get(headMethod)
     if fi.IsDir() {
-        if isHead { // 不支持查看目录的大小信息
+        if headStr != "" {
             return errors.New("head not support list dir")
         }
         if useEncrypt != "" { // 加密方式不支持浏览目录,懒得写前端代码
@@ -265,7 +271,8 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
             w.Write(htmlAtdTr)
         }
         w.Write(htmlSuffix)
-    } else if isHead { // 返回服务器当前文件大小,用于断点上传,可用curl进行断点上传
+    } else if headStr == "check" {
+        // 返回服务器当前文件大小,用于断点上传,可用curl进行断点上传
         size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
         w.Header().Set(janbarLength, size)
         w.Write([]byte("curl -C " + size + " --data-binary @file url\n"))
@@ -382,7 +389,7 @@ func clientHead(url string) (int64, error) {
     if err != nil {
         return 0, err
     }
-    req.Header.Set("head", "true")
+    req.Header.Set(headMethod, "check")
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
         return 0, err
@@ -401,9 +408,30 @@ func clientPost(data, url string, point bool, buf []byte) error {
         key  string
         path string
         body io.Reader
-        c    Stream
+        c    cipher.Stream
         err  error
     )
+    if useEncrypt != "" { // 加密上传数据
+        key, c, err = newEncrypt(buf)
+        if err != nil {
+            return err
+        }
+        req, err := http.NewRequest(http.MethodPost, url, nil)
+        if err != nil {
+            return err
+        }
+        req.Header.Set(headMethod, "check")
+        req.Header.Set(encryptFlag, key)
+        resp, err := http.DefaultClient.Do(req)
+        if err != nil {
+            return err
+        }
+        resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            return errors.New("key is error")
+        }
+    }
+
     if len(data) >= 1 && data[0] == '@' {
         if point { // 断点上传
             size, err = clientHead(url)
@@ -439,13 +467,6 @@ func clientPost(data, url string, point bool, buf []byte) error {
         size, path, body = sr.Size(), "string data", sr
     }
 
-    if useEncrypt != "" { // 加密上传数据
-        key, c, err = newEncrypt(buf)
-        if err != nil {
-            return err
-        }
-    }
-
     pr := handleWriteReadData(&handleData{
         handle: body.Read,
         cipher: c,
@@ -459,7 +480,7 @@ func clientPost(data, url string, point bool, buf []byte) error {
     req.Header.Set(headerType, urlencoded)
     req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
     if point { // 告诉服务器断点续传的上传数据
-        req.Header.Set("point", "true")
+        req.Header.Set(headPoint, "true")
     }
     if key != "" {
         req.Header.Set(encryptFlag, key)
@@ -470,7 +491,11 @@ func clientPost(data, url string, point bool, buf []byte) error {
         return err
     }
     if resp.Body != nil {
-        io.CopyBuffer(os.Stdout, resp.Body, buf[1024:])
+        if resp.StatusCode != http.StatusOK {
+            io.CopyBuffer(os.Stdout, resp.Body, buf)
+        } else {
+            io.CopyBuffer(ioutil.Discard, resp.Body, buf)
+        }
         resp.Body.Close()
     }
     return nil
@@ -503,7 +528,7 @@ func clientGet(url, output string, point bool, buf []byte) error {
     }
     defer fw.Close()
 
-    var c Stream
+    var c cipher.Stream
     if useEncrypt != "" { // 客户端将随机秘钥发到服务器
         var key string
         key, c, err = newEncrypt(buf)
@@ -641,7 +666,7 @@ type handleData struct {
     rate     chan int64
     header   http.Header
     buf, tmp []byte
-    cipher   Stream
+    cipher   cipher.Stream
 
     writeHeader func(int)
     handle      func([]byte) (int, error)
@@ -735,19 +760,15 @@ func genByte(buf []byte, n int) []byte {
 }
 
 /*--------------------------------加密工具类---------------------------------*/
-// 我下面只使用最简单的rc4加密,实现下面接口可以自定义任意加密方式
-type Stream interface {
-    XORKeyStream(dst, src []byte)
-}
-
 // 生成随机秘钥,并返回加密对象
-func newEncrypt(buf []byte) (string, Stream, error) {
+func newEncrypt(buf []byte) (string, cipher.Stream, error) {
     tmp := genByte(buf, 32)
-    _, err := rand.Read(tmp[2:])
+    _, err := rand.Read(tmp[8:30])
     if err != nil {
         return "", nil, err
     }
-    tmp[0], tmp[1] = calcCrc(tmp[2:]) // 存入2byte的crc
+    setGetInt64(tmp, time.Now().Unix())  // 将时间戳存进去
+    tmp[30], tmp[31] = calcCrc(tmp[:30]) // 存入2byte的crc
 
     dst := genByte(buf[64:], 32)
     if err = encryptKey(dst, tmp); err != nil {
@@ -758,7 +779,7 @@ func newEncrypt(buf []byte) (string, Stream, error) {
 }
 
 // 根据秘钥返回解密对象
-func newDecrypt(key string) (Stream, error) {
+func newDecrypt(key string) (cipher.Stream, error) {
     if key == "" {
         return nil, errors.New("key is empty")
     }
@@ -771,12 +792,32 @@ func newDecrypt(key string) (Stream, error) {
         return nil, err
     }
     if len(dst) == 32 {
-        c0, c1 := calcCrc(dst[2:])
-        if c0 == dst[0] && c1 == dst[1] {
-            return newRc4Cipher(dst), nil
+        c0, c1 := calcCrc(dst[:30])
+        if c0 == dst[30] && c1 == dst[31] {
+            sub := time.Now().Unix() - setGetInt64(dst, -1)
+            if sub > -120 && sub < 120 { // 时间戳在误差内
+                return newRc4Cipher(dst), nil
+            }
         }
     }
     return nil, errors.New("key decrypt error")
+}
+
+func setGetInt64(b []byte, data int64) int64 {
+    loop := [...]int{0, 8, 16, 24, 32, 40, 48, 56}
+    if data >= 0 { // 将data存入b
+        u := uint64(data)
+        for i, v := range loop {
+            b[i] = byte(u >> v)
+        }
+    } else { // 从b中得出data
+        var u uint64
+        for i, v := range loop {
+            u |= uint64(b[i]) << v
+        }
+        data = int64(u)
+    }
+    return data
 }
 
 func calcCrc(buf []byte) (byte, byte) {
@@ -817,21 +858,21 @@ func encryptKey(dst, src []byte) error {
 
 type rc4Cipher struct {
     s    [256]uint32
-    l    int
     x, y uint32
 
     i, j, i0, j0, tmp uint8
 }
 
-func newRc4Cipher(key []byte) Stream {
+func newRc4Cipher(key []byte) cipher.Stream {
     c := new(rc4Cipher)
     for i := uint32(0); i < 256; i++ {
         c.s[i] = i
     }
     // 初始变量需要做好赋值
-    c.i, c.j, c.j0, c.l = 0, 0, 0, len(key)
+    c.i, c.j, c.j0 = 0, 0, 0
+    l := len(key)
     for i := 0; i < 256; i++ {
-        c.j0 += uint8(c.s[i]) + key[i%c.l]
+        c.j0 += uint8(c.s[i]) + key[i%l]
         c.s[i], c.s[c.j0] = c.s[c.j0], c.s[i]
     }
     c.tmp = uint8(c.s[key[0]])
