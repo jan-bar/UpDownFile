@@ -33,6 +33,7 @@ const (
     headPoint    = "point"
     headerType   = "Content-Type"
     urlencoded   = "application/x-www-form-urlencoded"
+    limitKeyTime = 120
 )
 
 func main() {
@@ -148,9 +149,16 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
     }
 }
 
-func httpGetStream(key string) (cipher.Stream, error) {
+func httpGetStream(key string, check bool) (cipher.Stream, error) {
     if useEncrypt != "" { // 服务器启用秘钥
-        return newDecrypt(key)
+        c, err := newDecrypt(key)
+        if err != nil {
+            return nil, err
+        }
+        if check && storeKeyFail(key) {
+            return nil, errors.New("key have been used")
+        }
+        return c, nil
     }
     if key != "" { // 未启用秘钥时,客户端发送了秘钥则提示不支持
         return nil, errors.New("server not support encrypt data")
@@ -166,12 +174,9 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 
         fileFlag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
     )
-    c, err := httpGetStream(r.Header.Get(encryptFlag))
+    c, err := httpGetStream(r.Header.Get(encryptFlag), r.Header.Get(headMethod) != "check")
     if err != nil {
         return err
-    }
-    if c != nil && r.Header.Get(headMethod) == "check" {
-        return nil // 告诉客户端秘钥有效
     }
 
     if r.Header.Get(headerType) == urlencoded {
@@ -277,7 +282,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         w.Header().Set(janbarLength, size)
         w.Write([]byte("curl -C " + size + " --data-binary @file url\n"))
     } else {
-        c, err := httpGetStream(r.Header.Get(encryptFlag))
+        c, err := httpGetStream(r.Header.Get(encryptFlag), true)
         if err != nil {
             return err
         }
@@ -794,13 +799,19 @@ func newDecrypt(key string) (cipher.Stream, error) {
     if len(dst) == 32 {
         c0, c1 := calcCrc(dst[:30])
         if c0 == dst[30] && c1 == dst[31] {
-            sub := time.Now().Unix() - setGetInt64(dst, -1)
-            if sub > -120 && sub < 120 { // 时间戳在误差内
+            if abs(time.Now().Unix()-setGetInt64(dst, -1)) < limitKeyTime {
                 return newRc4Cipher(dst), nil
             }
         }
     }
     return nil, errors.New("key decrypt error")
+}
+
+func abs(d int64) int64 {
+    if d < 0 {
+        return -d
+    }
+    return d
 }
 
 func setGetInt64(b []byte, data int64) int64 {
@@ -890,4 +901,30 @@ func (c *rc4Cipher) XORKeyStream(dst, src []byte) {
         dst[k] = v ^ uint8(c.s[uint8(c.x+c.y)]) ^ c.tmp
     }
     c.i, c.j = c.i0, c.j0
+}
+
+var storeKey = struct {
+    sync.Mutex
+    m   map[string]int64
+}{
+    m: make(map[string]int64, 1),
+}
+
+// 当key不存在则缓存,返回true
+// 当key不存在则清空m里面超过限定时间的记录,返回false
+func storeKeyFail(key string) bool {
+    storeKey.Lock()
+    defer storeKey.Unlock()
+    now := time.Now().Unix()
+    _, ok := storeKey.m[key]
+    if ok {
+        for k, v := range storeKey.m {
+            if abs(now-v) > limitKeyTime {
+                delete(storeKey.m, k)
+            }
+        }
+        return true
+    }
+    storeKey.m[key] = now
+    return false
 }
