@@ -5,11 +5,13 @@ import (
     "compress/zlib"
     "crypto/aes"
     "crypto/cipher"
+    "crypto/md5"
     "crypto/rand"
     "encoding/base64"
     "errors"
     "flag"
     "fmt"
+    "hash"
     "io"
     "io/ioutil"
     "net"
@@ -26,11 +28,11 @@ import (
 
 const (
     timeLayout   = "2006-01-02 15:04:05"
-    encryptFlag  = "encrypt"
+    encryptFlag  = "Encrypt"
     headerLength = "Content-Length"
     janbarLength = "Janbar-Length"
-    headMethod   = "head"
-    headPoint    = "point"
+    headMethod   = "Head"
+    headPoint    = "Point"
     headerType   = "Content-Type"
     urlencoded   = "application/x-www-form-urlencoded"
     limitKeyTime = 120
@@ -44,18 +46,38 @@ func main() {
         return
     }
 
-    var addrStr string
     flag.StringVar(&basePath, "p", ".", "path")
-    flag.StringVar(&addrStr, "s", ":8080", "ip:port")
+    var addrStr string // 不传参数时,随机分配
+    flag.StringVar(&addrStr, "s", "", "ip:port")
     flag.StringVar(&useEncrypt, "e", "", "encrypt data")
+    reg := flag.Bool("reg", false, "add right click registry")
     flag.Parse()
 
-    addr, err := net.Listen("tcp", addrStr)
+    tcpAddr, err := net.ResolveTCPAddr("tcp", addrStr)
     if err != nil {
         fmt.Println(err)
         return
     }
-    addrStr = addr.Addr().String()
+    addrStr = tcpAddr.String()
+
+    getIcoData() // 获取ico文件
+    if *reg {
+        if len(tcpAddr.IP) > 0 && tcpAddr.Port > 0 {
+            err = createRegFile(addrStr)
+            if err != nil {
+                fmt.Println(err)
+            }
+        } else {
+            fmt.Println("ip:port = " + addrStr)
+        }
+        return
+    }
+
+    addr, err := net.ListenTCP("tcp", tcpAddr)
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
 
     basePath, err = filepath.Abs(basePath)
     if err != nil {
@@ -69,29 +91,29 @@ func main() {
         fmt.Printf(`server:
     %s -s %s -p %s
 cli get:
-    %s cli -u "http://%s/dir/tmp.txt" -c
+    %s cli -u "http://%s/tmp.txt" -c
 cli post:
-    %s cli -d @C:\tmp.txt -u "http://%s/dir/tmp.txt" -c
+    %s cli -d @C:\tmp.txt -u "http://%s/tmp.txt" -c
 `, os.Args[0], addrStr, basePath, os.Args[0], addrStr, os.Args[0], addrStr)
     } else {
         fmt.Printf(`server:
     %s -s %s -p %s -e %s
 cli get:
-    %s cli -u "http://%s/dir/tmp.txt" -c -e %s
+    %s cli -u "http://%s/tmp.txt" -c -e %s
 cli post:
-    %s cli -d @C:\tmp.txt -u "http://%s/dir/tmp.txt" -c -e %s
+    %s cli -d @C:\tmp.txt -u "http://%s/tmp.txt" -c -e %s
 `, os.Args[0], addrStr, basePath, useEncrypt, os.Args[0],
             addrStr, useEncrypt, os.Args[0], addrStr, useEncrypt)
     }
 
     fmt.Printf(`
 GET file:
-    wget -c --content-disposition "http://%s/dir/tmp.txt"
-    curl -C - -OJ "http://%s/dir/tmp.txt"
+    wget -c --content-disposition "http://%s/tmp.txt"
+    curl -C - -OJ "http://%s/tmp.txt"
 POST file:
-    wget -qO - --post-file=C:\tmp.txt "http://%s/dir/tmp.txt"
-    curl --data-binary @C:\tmp.txt "http://%s/dir/tmp.txt"
-    curl -F "file=@C:\tmp.txt" "http://%s/dir/"
+    wget -qO - --post-file=C:\tmp.txt "http://%s/tmp.txt"
+    curl --data-binary @C:\tmp.txt "http://%s/tmp.txt"
+    curl -F "file=@C:\tmp.txt" "http://%s/"
 `, addrStr, addrStr, addrStr, addrStr, addrStr)
 
     http.HandleFunc("/", upDownFile)
@@ -102,28 +124,56 @@ POST file:
     }
 }
 
+func createRegFile(addr string) error {
+    fw, err := os.Create("addRightClickRegistry.reg")
+    if err != nil {
+        return err
+    }
+    defer fw.Close()
+    absPath, err := filepath.Abs(os.Args[0])
+    if err != nil {
+        return err
+    }
+    icoFile := filepath.Join(filepath.Dir(absPath), "fileServer.ico")
+    err = ioutil.WriteFile(icoFile, icoData, 0666)
+    if err != nil {
+        return err
+    }
+    absPath = strings.ReplaceAll(absPath, "\\", "\\\\")
+    icoFile = strings.ReplaceAll(icoFile, "\\", "\\\\")
+    fmt.Fprintf(fw, `Windows Registry Editor Version 5.00
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\fileServer]
+@="File Server Here"
+"Icon"="%s"
+
+[HKEY_CLASSES_ROOT\Directory\Background\shell\fileServer\command]
+@="\"%s\" -s \"%s\" -p \"%%V\""
+`, icoFile, absPath, addr)
+    return nil
+}
+
 var (
     bytePool = sync.Pool{New: func() interface{} {
         return make([]byte, 32768) // 32<<10
     }}
-    icoData struct {
-        sync.Once
-        data []byte
-    }
+    icoData    []byte
     basePath   string
     useEncrypt string
+    errCheckOk = errors.New("check header")
 )
 
+func getIcoData() {
+    const ico = "eNrs2UtPE1EUB/DLyp2uxAfysAgUUGQpEEMMMUZRYgwLl8aV38C4EuNCVyoYX5AGwkMbxBgjj/pKREkoRSggBCSmFBGRptIUC22HxzEzzFzbe6e0xJk7HdOT/HLgzrmTP4WEeSCUhJJQYSHfM5A5C6FkhJARIVSIELqANtal6tm+IVGJSpQ+a9eNQdBr9uSaaZDsvmm36yn7nnvfgaSX7CkPfoAMjx6yp98Zh7TaeYoesu+vnvBkmNxAkv0ddTkg3mTWLwgMIcjc+ywOSPnohr3WxbiS1eilkNlTLVP1KdbfoIXeR0WCLy3FMNZYjL+Xjhubw6VapujP/oNbk9x85s1YTWXgcrkg78myQNpL5e/zAUvjzSUw+Tg21toicMy7w/ZTfz99PmDlq/kohV831FrAYHorO2OrKwk7B5Xf5gMWOhsrwdFaivFrfG5yjl8LnZNmJWT+NNsSsDD19BjW1HFFyBlxvtcbNm9vKMXHqP9t/UvAwvSzMiyzzrLlPdKaVvlnnh/HYs0fuidS/oz+ZWBh9sUJLNosx3ER91DXF5+WgYW5lyexzeb47LxIe7TK/7O9HCNzktlvzQTgSK+T2iOX3zDgBxZcnWewcfMpYU3KG+qXn6Pmh19dxOfRKj/PbanAJlrL8fr5iUDY3FxHRdhs6DEyf+aAH1hZeH2WMtl2Gi51d0Fb+2Xha/I4eQ4y/4HBALDkeXMuZnL7tc4v8b6r3FSkfWT+LHsQtBSauaWnJuo8mT/bHgQ9IfPvrHZC9lBQN6hncXe/Qc4QpxvUM637syAxDnFxj7p/fDgHSsixBcA4zKmOun+pc4GScodXVEVdv5ncoLS8kRXVUNcPDR5QA6v82U2LoIb8kVVVyD33zG3xgRoOfl5VnFz+fLPfk2/2gxpY5JfqUGsQFDe6pigtnuEXjK6BUrR8F1Ewtg7/Il7eqRweW4ctup14a5yoRNEFQkXpK2L3it0p9m6xXxP7dYSc/Em3IVTF9x1/O/pPuvTzvBe7U+wAUCV2J0oXegBdjf75/gkAAP//V+RzmQ"
+    zr, _ := zlib.NewReader(base64.NewDecoder(base64.RawStdEncoding, strings.NewReader(ico)))
+    data := bytes.NewBuffer(make([]byte, 0, 9662))
+    io.Copy(data, zr)
+    zr.Close()
+    icoData = data.Bytes()
+}
+
 func faviconIco(w http.ResponseWriter, _ *http.Request) {
-    icoData.Do(func() { // ico图标嵌入代码
-        const ico = "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"
-        zr, _ := zlib.NewReader(base64.NewDecoder(base64.RawStdEncoding, strings.NewReader(ico)))
-        data := bytes.NewBuffer(make([]byte, 0, 27206))
-        io.Copy(data, zr)
-        zr.Close()
-        icoData.data = data.Bytes()
-    })
-    w.Write(icoData.data)
+    w.Write(icoData)
 }
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
@@ -155,8 +205,8 @@ func httpGetStream(key string, check bool) (cipher.Stream, error) {
         if err != nil {
             return nil, err
         }
-        if check && storeKeyFail(key) {
-            return nil, errors.New("key have been used")
+        if check { // 检查key成功,上层用来判断
+            return nil, errCheckOk
         }
         return c, nil
     }
@@ -171,15 +221,20 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         path string
         size int64
         fr   io.ReadCloser
+        c    cipher.Stream
 
         fileFlag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
     )
-    c, err := httpGetStream(r.Header.Get(encryptFlag), r.Header.Get(headMethod) != "check")
-    if err != nil {
-        return err
-    }
-
     if r.Header.Get(headerType) == urlencoded {
+        var err error
+        c, err = httpGetStream(r.Header.Get(encryptFlag), r.Header.Get(headMethod) == "check")
+        if err != nil {
+            if err == errCheckOk {
+                return nil // 返回客户端key正确
+            }
+            return err
+        }
+
         s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
         if err != nil { // go库会删掉headerLength
             s, err = strconv.ParseInt(r.Header.Get(janbarLength), 10, 0)
@@ -207,8 +262,9 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
     }
 
     pw := handleWriteReadData(&handleData{
-        handle: fw.Write,
-        cipher: c,
+        handle:     fw.Write,
+        cipher:     c,
+        hashMethod: hashAfter,
     }, "POST>"+path, size)
     _, err = io.CopyBuffer(pw, fr, buf)
     fw.Close() // 趁早刷新缓存
@@ -282,7 +338,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         w.Header().Set(janbarLength, size)
         w.Write([]byte("curl -C " + size + " --data-binary @file url\n"))
     } else {
-        c, err := httpGetStream(r.Header.Get(encryptFlag), true)
+        c, err := httpGetStream(r.Header.Get(encryptFlag), false)
         if err != nil {
             return err
         }
@@ -291,6 +347,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
             header:      w.Header(),
             writeHeader: w.WriteHeader,
             cipher:      c,
+            hashMethod:  hashBefore,
         }, "GET >"+path, fi.Size())
         // 使用go库的文件服务器,支持断点续传,以及各种处理
         http.ServeFile(pw, r, path)
@@ -425,16 +482,19 @@ func clientPost(data, url string, point bool, buf []byte) error {
         if err != nil {
             return err
         }
+        req.Header.Set(headerType, urlencoded)
         req.Header.Set(headMethod, "check")
         req.Header.Set(encryptFlag, key)
         resp, err := http.DefaultClient.Do(req)
         if err != nil {
             return err
         }
-        resp.Body.Close()
         if resp.StatusCode != http.StatusOK {
-            return errors.New("key is error")
+            io.CopyBuffer(os.Stdout, resp.Body, buf)
+            resp.Body.Close()
+            return nil
         }
+        resp.Body.Close()
     }
 
     if len(data) >= 1 && data[0] == '@' {
@@ -571,8 +631,9 @@ func clientGet(url, output string, point bool, buf []byte) error {
     }
 
     pw := handleWriteReadData(&handleData{
-        handle: fw.Write,
-        cipher: c,
+        handle:     fw.Write,
+        cipher:     c,
+        hashMethod: hashAfter,
     }, "GET >"+output, size)
     _, err = io.CopyBuffer(pw, resp.Body, buf)
     pw.Close()
@@ -666,27 +727,53 @@ func (d *dirInfoSort) Swap(x, y int) {
     d.fi[x], d.fi[y] = d.fi[y], d.fi[x]
 }
 
-type handleData struct {
-    cnt      int64
-    rate     chan int64
-    header   http.Header
-    buf, tmp []byte
-    cipher   cipher.Stream
+type (
+    hashMethod uint8
 
-    writeHeader func(int)
-    handle      func([]byte) (int, error)
-}
+    handleData struct {
+        cnt      int64
+        rate     chan int64
+        header   http.Header
+        buf, tmp []byte
+        cipher   cipher.Stream
+
+        hash        hash.Hash
+        hashMethod  hashMethod
+        writeHeader func(int)
+        handle      func([]byte) (int, error)
+    }
+)
+
+const (
+    hashBefore hashMethod = iota
+    hashAfter
+)
 
 func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
+    if p.hash == nil {
+        p.hash = md5.New()
+    }
     p.rate = make(chan int64)
     p.buf = bytePool.Get().([]byte)
-    go func(rate <-chan int64, format string, size int64) {
+    go func(rate <-chan int64, prefix string, size int64, h hash.Hash) {
+        pCur := "\r" + prefix + " %3d%%"
         for cur := range rate {
-            fmt.Printf(format, cur*100/size)
+            fmt.Printf(pCur, cur*100/size)
         }
-        fmt.Printf(format+"\n", 100)
-    }(p.rate, "\r"+prefix+" %3d%%", size)
+        fmt.Println("\r" + prefix + " 100% " + toHexStr(h.Sum(nil)))
+    }(p.rate, prefix, size, p.hash)
     return p
+}
+
+func toHexStr(src []byte) string {
+    const hexTable = "0123456789abcdef"
+    str := new(strings.Builder)
+    str.Grow(2 * len(src))
+    for _, v := range src {
+        str.WriteByte(hexTable[v>>4])
+        str.WriteByte(hexTable[v&0xf])
+    }
+    return str.String()
 }
 
 func (p *handleData) Header() http.Header { return p.header }
@@ -707,8 +794,14 @@ func (p *handleData) Write(b []byte) (n int, err error) {
         p.tmp = genByte(p.buf, len(b))
         p.cipher.XORKeyStream(p.tmp, b)
         n, err = p.handle(p.tmp)
+        if p.hashMethod == hashAfter {
+            p.hash.Write(p.tmp[:n]) // 使用解密后数据计算hash
+        } else {
+            p.hash.Write(b[:n]) // 使用加密前数据计算hash
+        }
     } else {
         n, err = p.handle(b)
+        p.hash.Write(b[:n])
     }
     p.add(n)
     return
@@ -717,18 +810,20 @@ func (p *handleData) Read(b []byte) (n int, err error) {
     if p.cipher != nil {
         p.tmp = genByte(p.buf, len(b))
         if n, err = p.handle(p.tmp); n > 0 {
+            p.hash.Write(p.tmp[:n]) // 使用加密前数据计算hash
             p.cipher.XORKeyStream(b[:n], p.tmp[:n])
         }
     } else {
         n, err = p.handle(b)
+        p.hash.Write(b[:n])
     }
     p.add(n)
     return
 }
 func (p *handleData) Close() {
-    bytePool.Put(p.buf)
     close(p.rate)
-    time.Sleep(time.Nanosecond) // 等打印协程打印完
+    time.Sleep(time.Millisecond) // 等打印协程打印完
+    bytePool.Put(p.buf)
 }
 
 var unitByte = []struct {
@@ -779,8 +874,7 @@ func newEncrypt(buf []byte) (string, cipher.Stream, error) {
     if err = encryptKey(dst, tmp); err != nil {
         return "", nil, err
     }
-    key := base64.StdEncoding.EncodeToString(dst)
-    return key, newRc4Cipher(tmp), nil
+    return base64.StdEncoding.EncodeToString(dst), newRc4Cipher(tmp), nil
 }
 
 // 根据秘钥返回解密对象
@@ -901,30 +995,4 @@ func (c *rc4Cipher) XORKeyStream(dst, src []byte) {
         dst[k] = v ^ uint8(c.s[uint8(c.x+c.y)]) ^ c.tmp
     }
     c.i, c.j = c.i0, c.j0
-}
-
-var storeKey = struct {
-    sync.Mutex
-    m   map[string]int64
-}{
-    m: make(map[string]int64, 1),
-}
-
-// 当key不存在则缓存,返回true
-// 当key不存在则清空m里面超过限定时间的记录,返回false
-func storeKeyFail(key string) bool {
-    storeKey.Lock()
-    defer storeKey.Unlock()
-    now := time.Now().Unix()
-    _, ok := storeKey.m[key]
-    if ok {
-        for k, v := range storeKey.m {
-            if abs(now-v) > limitKeyTime {
-                delete(storeKey.m, k)
-            }
-        }
-        return true
-    }
-    storeKey.m[key] = now
-    return false
 }
