@@ -294,14 +294,12 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
         }
 
         tmpInt, _ := strconv.Atoi(r.FormValue("sort"))
-        if tmpInt < 0 || tmpInt > 5 {
-            tmpInt = 0
-        }
-        dir, err := sortDir(path, sortDirType(tmpInt))
+        dir, err := sortDir(path, &tmpInt)
         if err != nil {
             return err
         }
-        tmpInt = htmlIndex[tmpInt]
+        // 找到对应位置插入checked字段
+        tmpInt = 11 + bytes.Index(htmlPrefix, append(buf[:0], "sortDir("+string('0'+tmpInt)...))
         w.Write(htmlPrefix[:tmpInt])
         w.Write(htmlChecked) // 加入默认被选中
         w.Write(htmlPrefix[tmpInt:])
@@ -369,11 +367,11 @@ var (
     htmlGt      = []byte("\">")
     htmlAtdTr   = []byte("</a></td></tr>")
     htmlChecked = []byte(" checked")
-    htmlIndex   = [6]int{172, 252, 340, 420, 508, 588} // 插入checked位置
     htmlPrefix  = []byte(`<html lang="zh"><head><title>list dir</title></head><body><div style="position:fixed;bottom:20px;right:10px">
 <p><label><input type="radio" name="sort" onclick="sortDir(0)">名称升序</label><label><input type="radio" name="sort" onclick="sortDir(1)">名称降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(2)">时间升序</label><label><input type="radio" name="sort" onclick="sortDir(3)">时间降序</label></p>
 <p><label><input type="radio" name="sort" onclick="sortDir(4)">大小升序</label><label><input type="radio" name="sort" onclick="sortDir(5)">大小降序</label></p>
+<p><label><input type="radio" name="sort" onclick="sortDir(6)">后缀升序</label><label><input type="radio" name="sort" onclick="sortDir(7)">后缀降序</label></p>
 <p><input type="file" id="file"></p><progress value="0" id="progress"></progress><p><input type="button" onclick="uploadFile()" value="上传文件"></p><input type="button" onclick="backSuper()" value="返回上级"/>
 <a href="#top" style="margin:5px">顶部</a><a href="#bottom">底部</a></div><table border="1" align="center"><tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>`)
     htmlSuffix = []byte(`</table><a name="bottom"></a><script>
@@ -648,6 +646,8 @@ const (
     sortDirTypeByTimeDesc
     sortDirTypeBySizeAsc
     sortDirTypeBySizeDesc
+    sortDirTypeByExtAsc
+    sortDirTypeByExtDesc
 )
 
 type (
@@ -658,7 +658,12 @@ type (
     }
 )
 
-func sortDir(dir string, sortType sortDirType) ([]os.FileInfo, error) {
+func sortDir(dir string, inputType *int) ([]os.FileInfo, error) {
+    sortType := sortDirType(*inputType)
+    if sortType < sortDirTypeByNameAsc || sortType > sortDirTypeByExtDesc {
+        sortType = sortDirTypeByNameAsc
+        *inputType = int(sortDirTypeByNameAsc)
+    }
     f, err := os.Open(dir)
     if err != nil {
         return nil, err
@@ -721,6 +726,16 @@ func (d *dirInfoSort) Less(x, y int) bool {
             return d.Default(x, y)
         }
         return sx > sy
+    case sortDirTypeByExtAsc:
+        if !d.fi[x].IsDir() && !d.fi[y].IsDir() {
+            return filepath.Ext(d.fi[x].Name()) < filepath.Ext(d.fi[y].Name())
+        }
+        return d.Default(x, y)
+    case sortDirTypeByExtDesc:
+        if !d.fi[x].IsDir() && !d.fi[y].IsDir() {
+            return filepath.Ext(d.fi[x].Name()) > filepath.Ext(d.fi[y].Name())
+        }
+        return d.Default(x, y)
     }
 }
 func (d *dirInfoSort) Swap(x, y int) {
