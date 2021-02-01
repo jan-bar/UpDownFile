@@ -16,6 +16,13 @@
 
 ![展示Web页面](ShowWeb.png)
 
+10. 确保文件正确性,增加计算md5值功能,服务器端会自动计算md5值,使用cli工具时客户端也会计算md5值,包括加密传输时也会正确计算md5值。
+```bash
+GET >e:\1.txt 100% 9d684b1f28fbde1b730681673d83530e
+GET >e:\2.jpg 100% f7d3bb804a1fbb12b8eff77785a1bc4c
+POST>e:\dos2unix 100% 3a7237e306544a12b5d0438fadc55f03
+```
+
 执行：UpDownFile，会打印帮助文档，里面有使用curl和wget的上传下载文件命令。  
 下载文件时会自动保存文件名为参数里面的basename。  
 上传文件时会保存到url参数里面的文件路径。  
