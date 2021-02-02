@@ -58,10 +58,10 @@ func main() {
         fmt.Println(err)
         return
     }
-    addrStr = tcpAddr.String()
 
     getIcoData() // 获取ico文件
     if *reg {
+        addrStr = tcpAddr.String()
         if len(tcpAddr.IP) > 0 && tcpAddr.Port > 0 {
             err = createRegFile(addrStr)
             if err != nil {
@@ -78,6 +78,7 @@ func main() {
         fmt.Println(err)
         return
     }
+    addrStr = addr.Addr().String()
 
     basePath, err = filepath.Abs(basePath)
     if err != nil {
