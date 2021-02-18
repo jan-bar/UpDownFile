@@ -6,6 +6,7 @@ import (
     "crypto/cipher"
     "crypto/md5"
     "crypto/rand"
+    _ "embed"
     "encoding/base64"
     "errors"
     "flag"
