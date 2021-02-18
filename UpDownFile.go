@@ -2,7 +2,6 @@ package main
 
 import (
     "bytes"
-    "compress/zlib"
     "crypto/aes"
     "crypto/cipher"
     "crypto/md5"
@@ -59,7 +58,6 @@ func main() {
         return
     }
 
-    getIcoData() // 获取ico文件
     if *reg {
         addrStr = tcpAddr.String()
         if len(tcpAddr.IP) > 0 && tcpAddr.Port > 0 {
@@ -158,20 +156,12 @@ var (
     bytePool = sync.Pool{New: func() interface{} {
         return make([]byte, 32768) // 32<<10
     }}
+    //go:embed fileServer.ico
     icoData    []byte
     basePath   string
     useEncrypt string
     errCheckOk = errors.New("check header")
 )
-
-func getIcoData() {
-    const ico = "eNrs2UtPE1EUB/DLyp2uxAfysAgUUGQpEEMMMUZRYgwLl8aV38C4EuNCVyoYX5AGwkMbxBgjj/pKREkoRSggBCSmFBGRptIUC22HxzEzzFzbe6e0xJk7HdOT/HLgzrmTP4WEeSCUhJJQYSHfM5A5C6FkhJARIVSIELqANtal6tm+IVGJSpQ+a9eNQdBr9uSaaZDsvmm36yn7nnvfgaSX7CkPfoAMjx6yp98Zh7TaeYoesu+vnvBkmNxAkv0ddTkg3mTWLwgMIcjc+ywOSPnohr3WxbiS1eilkNlTLVP1KdbfoIXeR0WCLy3FMNZYjL+Xjhubw6VapujP/oNbk9x85s1YTWXgcrkg78myQNpL5e/zAUvjzSUw+Tg21toicMy7w/ZTfz99PmDlq/kohV831FrAYHorO2OrKwk7B5Xf5gMWOhsrwdFaivFrfG5yjl8LnZNmJWT+NNsSsDD19BjW1HFFyBlxvtcbNm9vKMXHqP9t/UvAwvSzMiyzzrLlPdKaVvlnnh/HYs0fuidS/oz+ZWBh9sUJLNosx3ER91DXF5+WgYW5lyexzeb47LxIe7TK/7O9HCNzktlvzQTgSK+T2iOX3zDgBxZcnWewcfMpYU3KG+qXn6Pmh19dxOfRKj/PbanAJlrL8fr5iUDY3FxHRdhs6DEyf+aAH1hZeH2WMtl2Gi51d0Fb+2Xha/I4eQ4y/4HBALDkeXMuZnL7tc4v8b6r3FSkfWT+LHsQtBSauaWnJuo8mT/bHgQ9IfPvrHZC9lBQN6hncXe/Qc4QpxvUM637syAxDnFxj7p/fDgHSsixBcA4zKmOun+pc4GScodXVEVdv5ncoLS8kRXVUNcPDR5QA6v82U2LoIb8kVVVyD33zG3xgRoOfl5VnFz+fLPfk2/2gxpY5JfqUGsQFDe6pigtnuEXjK6BUrR8F1Ewtg7/Il7eqRweW4ctup14a5yoRNEFQkXpK2L3it0p9m6xXxP7dYSc/Em3IVTF9x1/O/pPuvTzvBe7U+wAUCV2J0oXegBdjf75/gkAAP//V+RzmQ"
-    zr, _ := zlib.NewReader(base64.NewDecoder(base64.RawStdEncoding, strings.NewReader(ico)))
-    data := bytes.NewBuffer(make([]byte, 0, 9662))
-    io.Copy(data, zr)
-    zr.Close()
-    icoData = data.Bytes()
-}
 
 func faviconIco(w http.ResponseWriter, _ *http.Request) {
     w.Write(icoData)
