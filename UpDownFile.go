@@ -15,14 +15,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 )
 
 type poolByte struct{ buf []byte } // 这种方式才能过语法检查
@@ -128,9 +126,12 @@ Post File:
     curl --data-binary @C:\tmp.txt http://{{.addr}}/tmp.txt
     curl -F "file=@C:\tmp.txt" http://{{.addr}}/
 
-Upload Size
+Get Offset:
     curl -H "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
     wget -qO - --header "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
+
+Put File:
+	curl -C offset -T C:\tmp.txt http://{{.addr}}/tmp.txt
 `)
 	if err != nil {
 		panic(err)
@@ -365,10 +366,13 @@ func (w *webErr) Error() string {
 	return w.msg
 }
 
-func String2Byte(s string) []byte {
-	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
-	bh := reflect.SliceHeader{Data: sh.Data, Len: sh.Len, Cap: sh.Len}
-	return *(*[]byte)(unsafe.Pointer(&bh))
+func scanSize(h http.Header) (start, length, size int64, err error) {
+	var n int
+	n, err = fmt.Sscanf(h.Get("Content-Range"), "bytes %d-%d/%d", &start, &length, &size)
+	if n != 3 {
+		err = fmt.Errorf("scanSize n=%d", n)
+	}
+	return
 }
 
 /*---------------------------------End 工具类----------------------------------*/
@@ -461,7 +465,6 @@ function backSuper() {
 	urlencoded   = "application/x-www-form-urlencoded"
 	janEncoded   = "application/janbar" // 使用本工具命令行的头
 	headerLength = "Content-Length"
-	contentRange = "Content-Range"
 	janbarLength = "Janbar-Length"
 	headPoint    = "Point" // 标识断点上传
 	timeLayout   = "2006-01-02 15:04:05"
@@ -480,6 +483,8 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 		err = handleGetFile(w, r, buf.buf)
 	case http.MethodPost:
 		err = handlePostFile(w, r, buf.buf)
+	case http.MethodPut:
+		err = handlePutFile(w, r, buf.buf)
 	default:
 		err = NewWebErr(r.Method + " not support")
 	}
@@ -491,7 +496,7 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(e.code)
 		w.Header().Set(headerType, "text/html;charset=utf-8")
 		_, _ = w.Write(htmlMsgPrefix)
-		_, _ = w.Write(String2Byte(e.msg))
+		_, _ = w.Write([]byte(e.msg))
 		_, _ = w.Write(htmlMsgSuffix)
 	}
 }
@@ -520,8 +525,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
 		w.Header().Set(janbarLength, size)
 		//goland:noinspection HttpUrlsUsage
-		_, _ = fmt.Fprintf(w, "curl -C %s --data-binary @file http://%s%s\n",
-			size, r.Host, r.URL.Path)
+		_, _ = fmt.Fprintf(w, "curl -C %s -T file http://%s%s\n", size, r.Host, r.URL.Path)
 		return nil
 	}
 
@@ -599,7 +603,6 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		if err != nil {
 			return err
 		}
-
 		// 判断是断点上传,则cur为断点位置
 		cur, err = strconv.ParseInt(r.Header.Get(headPoint), 10, 64)
 		if err == nil {
@@ -637,6 +640,24 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	}
 	_, err = w.Write(respOk)
 	return err
+}
+
+// 只提供curl断点上传处理逻辑
+func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
+	cur, _, size, err := scanSize(r.Header)
+	if err != nil {
+		return NewWebErr("")
+	}
+
+	path := filepath.Join(basePath, r.URL.Path)
+	fi, err := os.Stat(path)
+	if err != nil {
+		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+	} else {
+		size := fi.Size()
+
+	}
+	return nil
 }
 
 type handleData struct {
@@ -915,9 +936,7 @@ func clientGet(url, output string, point bool, buf []byte) error {
 			return err
 		}
 	case http.StatusPartialContent:
-		var length int64 // 断点续传,从header中获取位置和总大小
-		_, err = fmt.Sscanf(resp.Header.Get(contentRange),
-			"bytes %d-%d/%d", &cur, &length, &size)
+		cur, _, size, err = scanSize(resp.Header)
 		if err != nil {
 			return err
 		}
