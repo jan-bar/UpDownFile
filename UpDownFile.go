@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/cipher"
+	"crypto/md5"
 	_ "embed"
 	"flag"
 	"fmt"
+	"hash"
 	"html/template"
-	"io/ioutil"
+	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,9 +49,9 @@ func main() {
 	}
 
 	if len(os.Args) > 2 && os.Args[1] == "cli" {
-		//if err = clientMain(); err != nil {
-		//	panic(err)
-		//}
+		if err = clientMain(); err != nil {
+			fmt.Println(err.Error())
+		}
 		return
 	}
 
@@ -105,23 +109,28 @@ func main() {
 	}
 
 	tpl, err := template.New("").Parse(`{{range $i,$v := .urls}}
-url: "http://{{$v}}"
+url: http://{{$v}}
 {{- end}}
 
 server:
     {{.exec}} -s {{.addr}} -p {{.dir}} -t {{.timeout}}{{if .pass}} -e {{.pass}}{{end}}
 cli get:
-    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} -u "http://{{.addr}}/tmp.txt"
+    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} http://{{.addr}}/tmp.txt
 cli post:
-    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} -d @C:\tmp.txt -u "http://{{.addr}}/tmp.txt"
+    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} -d @C:\tmp.txt http://{{.addr}}/tmp.txt
 
-GET file:
-    wget -c --content-disposition "http://{{.addr}}/tmp.txt"
-    curl -C - -OJ "http://{{.addr}}/tmp.txt"
-POST file:
-    wget -qO - --post-file=C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    curl --data-binary @C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    curl -F "file=@C:\tmp.txt" "http://{{.addr}}/"
+Get File:
+    wget -c --content-disposition http://{{.addr}}/tmp.txt
+    curl -C - -OJ http://{{.addr}}/tmp.txt
+
+Post File:
+    wget -qO - --post-file=C:\tmp.txt http://{{.addr}}/tmp.txt
+    curl --data-binary @C:\tmp.txt http://{{.addr}}/tmp.txt
+    curl -F "file=@C:\tmp.txt" http://{{.addr}}/
+
+Upload Size
+    curl -H "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
+    wget -qO - --header "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
 `)
 	if err != nil {
 		panic(err)
@@ -162,7 +171,7 @@ func createRegFile(addr string) error {
 	defer fw.Close()
 
 	icoFile := filepath.Join(filepath.Dir(execPath), "fileServer.ico")
-	err = ioutil.WriteFile(icoFile, icoData, 0666)
+	err = os.WriteFile(icoFile, icoData, fileMode)
 	if err != nil {
 		return err
 	}
@@ -356,10 +365,6 @@ func (w *webErr) Error() string {
 	return w.msg
 }
 
-func Byte2String(d []byte) string {
-	return *(*string)(unsafe.Pointer(&d))
-}
-
 func String2Byte(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
 	bh := reflect.SliceHeader{Data: sh.Data, Len: sh.Len, Cap: sh.Len}
@@ -372,12 +377,10 @@ func String2Byte(s string) []byte {
 var (
 	htmlMsgPrefix = []byte("<html><head><title>message</title></head><body><center><h2>")
 	htmlMsgSuffix = []byte("</h2></center></body></html>")
+	respOk        = []byte("ok")
 )
 
 const (
-	headerType = "Content-Type"
-	timeLayout = "2006-01-02 15:04:05"
-
 	htmlTpl = `<html lang="zh"><head><title>list dir</title></head><body>
 <div style="position:fixed;bottom:20px;right:10px"><p>
 <label><input type="radio" name="sort" onclick="sortDir(0)"{{if eq .sort 0}}checked{{end}}>名称升序</label>
@@ -452,6 +455,17 @@ function backSuper() {
 	for (;i >= 0 && url[i] !== '/';i--){}
 	window.location.href = window.location.origin + url.substring(0,i+1)
 }</script></body></html>`
+
+	fileMode     = fs.FileMode(0666)
+	headerType   = "Content-Type"
+	urlencoded   = "application/x-www-form-urlencoded"
+	janEncoded   = "application/janbar" // 使用本工具命令行的头
+	headerLength = "Content-Length"
+	contentRange = "Content-Range"
+	janbarLength = "Janbar-Length"
+	headPoint    = "Point" // 标识断点上传
+	timeLayout   = "2006-01-02 15:04:05"
+	encryptFlag  = "Encrypt" // header秘钥
 )
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
@@ -465,7 +479,7 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		err = handleGetFile(w, r, buf.buf)
 	case http.MethodPost:
-		//err = handlePostFile(w, r, buf.buf)
+		err = handlePostFile(w, r, buf.buf)
 	default:
 		err = NewWebErr(r.Method + " not support")
 	}
@@ -496,6 +510,19 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return NewWebErr(path+" not found", http.StatusNotFound)
+	}
+
+	if r.Header.Get(headerType) == janEncoded {
+		if fi.IsDir() {
+			return NewWebErr("unable to get directory size")
+		}
+		// 获取服务器文件大小,用于断点上传文件
+		size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
+		w.Header().Set(janbarLength, size)
+		//goland:noinspection HttpUrlsUsage
+		_, _ = fmt.Fprintf(w, "curl -C %s --data-binary @file http://%s%s\n",
+			size, r.Host, r.URL.Path)
+		return nil
 	}
 
 	if fi.IsDir() {
@@ -540,12 +567,380 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 			return err
 		}
 	} else {
-		http.ServeFile(w, r, path) // 支持断点下载
+		// 尝试获取断点下载的位置,获取不到cur=0
+		cur, _ := strconv.ParseInt(r.Header.Get(janbarLength), 10, 64)
+		pw := handleWriteReadData(&handleData{cur: cur, ResponseWriter: w}, "GET > "+path, fi.Size())
+		http.ServeFile(pw, r, path) // 支持断点下载
+		pw.Close()
 	}
 	return nil
+}
+
+func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
+	var (
+		path      string
+		size, cur int64
+		fr        io.ReadCloser
+		c         cipher.Stream
+
+		fileFlag = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	)
+
+	switch r.Header.Get(headerType) {
+	case urlencoded:
+		s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
+		if err != nil {
+			return err
+		}
+		// 普通二进制上传文件,消息体直接是文件内容
+		fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
+	case janEncoded:
+		s, err := strconv.ParseInt(r.Header.Get(janbarLength), 10, 0)
+		if err != nil {
+			return err
+		}
+
+		// 判断是断点上传,则cur为断点位置
+		cur, err = strconv.ParseInt(r.Header.Get(headPoint), 10, 64)
+		if err == nil {
+			fileFlag = os.O_CREATE | os.O_APPEND
+		}
+		// 本工具命令行上传文件
+		fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
+	default:
+		rf, rh, err := r.FormFile("file")
+		if err != nil {
+			return err
+		}
+		// 使用浏览器上传 或 curl -F "file=@C:\tmp.txt",这两种方式
+		fr, size, path = rf, rh.Size, filepath.Join(basePath, r.URL.Path, rh.Filename)
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer fr.Close()
+
+	fw, err := os.OpenFile(path, fileFlag, fileMode)
+	if err != nil {
+		return err
+	}
+
+	pw := handleWriteReadData(&handleData{
+		cur:       cur,
+		handle:    fw.Write,
+		cipher:    c,
+		hashAfter: true,
+	}, "POST> "+path, size)
+	_, err = io.CopyBuffer(pw, fr, buf)
+	_ = fw.Close() // 趁早刷新缓存,因为要计算hash
+	pw.Close()
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(respOk)
+	return err
+}
+
+type handleData struct {
+	http.ResponseWriter
+
+	cur       int64
+	rate      chan int64
+	sumHex    chan []byte
+	pool      *poolByte
+	hash      hash.Hash
+	hashAfter bool // true表示加解密后数据计算hash
+	cipher    cipher.Stream
+	handle    func([]byte) (int, error)
+}
+
+func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
+	if p.ResponseWriter != nil {
+		// 这个是http服务的写入操作
+		p.handle = p.ResponseWriter.Write
+	}
+
+	p.hash = md5.New()
+	p.rate = make(chan int64)
+	p.sumHex = make(chan []byte)
+	p.pool = bytePool.Get().(*poolByte)
+	go func() {
+		pCur := "\r" + prefix + " %3d%%"
+		for cur := range p.rate {
+			fmt.Printf(pCur, cur*100/size)
+		}
+		fmt.Printf("\r%s 100%% %02x\n", prefix, <-p.sumHex)
+		p.sumHex <- nil // 打印完成才能退出
+	}()
+	return p
+}
+
+func (p *handleData) add(n int) {
+	p.cur += int64(n)
+	select {
+	case p.rate <- p.cur:
+	default:
+	}
+}
+
+func (p *handleData) grow(n int) []byte {
+	if n > len(p.pool.buf) {
+		p.pool.buf = make([]byte, n)
+	}
+	return p.pool.buf[:n] // 获取足够缓存
+}
+
+func (p *handleData) Write(b []byte) (n int, err error) {
+	if p.cipher != nil {
+		tmp := p.grow(len(b))
+		n, err = p.handle(tmp)
+		if p.hashAfter {
+			// 使用解密后数据计算hash
+			p.hash.Write(tmp[:n])
+		} else {
+			// 使用加密前数据计算hash
+			p.hash.Write(b[:n])
+		}
+	} else if n, err = p.handle(b); n > 0 {
+		p.hash.Write(b[:n])
+	}
+	p.add(n)
+	time.Sleep(time.Millisecond * 50)
+	return
+}
+
+func (p *handleData) Read(b []byte) (n int, err error) {
+	if p.cipher != nil {
+		tmp := p.grow(len(b))
+		if n, err = p.handle(tmp); n > 0 {
+			p.hash.Write(tmp[:n]) // 使用加密前数据计算hash
+			p.cipher.XORKeyStream(b[:n], tmp[:n])
+		}
+	} else if n, err = p.handle(b); n > 0 {
+		p.hash.Write(b[:n])
+	}
+	p.add(n)
+	time.Sleep(time.Millisecond * 50)
+	return
+}
+
+func (p *handleData) Close() {
+	bytePool.Put(p.pool)
+	close(p.rate)
+	p.sumHex <- p.hash.Sum(nil)
+	<-p.sumHex // 发送hash结果,确保打印结束
 }
 
 /*-----------------------------Server End 端代码-------------------------------*/
 
 /*-----------------------------Client End 端代码-------------------------------*/
+func clientMain() error {
+	myFlag := flag.NewFlagSet(execPath+" cli", flag.ExitOnError)
+	data := myFlag.String("d", "", "post data")
+	output := myFlag.String("o", "", "output")
+	point := myFlag.Bool("c", false, "Resumed transfer offset")
+	myFlag.StringVar(&useEncrypt, "e", "", "encrypt data")
+	_ = myFlag.Parse(os.Args[2:])
+
+	httpUrl := myFlag.Arg(0)
+	if httpUrl == "" {
+		return NewWebErr("url is null")
+	}
+
+	buf := bytePool.Get().(*poolByte)
+	defer bytePool.Put(buf)
+	if *data != "" {
+		return clientPost(*data, httpUrl, *point, buf.buf)
+	}
+	return clientGet(httpUrl, *output, *point, buf.buf)
+}
+
+// 获取服务器文件大小,用于断点上传功能
+func clientHead(url string) (int64, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set(headerType, janEncoded)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return 0, nil // 服务器没有文件
+	}
+	return strconv.ParseInt(resp.Header.Get(janbarLength), 10, 0)
+}
+
+func clientPost(data, url string, point bool, buf []byte) error {
+	var (
+		size, cur int64
+		key       string
+		path      string
+		body      io.Reader
+		c         cipher.Stream
+		err       error
+	)
+	if useEncrypt != "" {
+	}
+
+	if len(data) > 1 && data[0] == '@' {
+		if point {
+			// 断点上传,获取服务器文件大小
+			cur, err = clientHead(url)
+			if err != nil {
+				return err
+			}
+		}
+
+		path = data[1:]
+		fr, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		//goland:noinspection GoUnhandledErrorResult
+		defer fr.Close()
+
+		fi, err := fr.Stat()
+		if err != nil {
+			return err
+		}
+		size = fi.Size()
+
+		if cur > 0 {
+			if cur == size {
+				return NewWebErr("file upload is complete")
+			}
+
+			// 断点上传时,将文件定位到指定位置
+			_, err = fr.Seek(cur, io.SeekStart)
+			if err != nil {
+				return err
+			}
+		}
+		body = fr
+	} else {
+		sr := strings.NewReader(data)
+		size, path, body = sr.Size(), "string data", sr
+	}
+
+	pr := handleWriteReadData(&handleData{
+		cur:    cur,
+		handle: body.Read,
+		cipher: c,
+	}, "POST> "+path, size)
+	defer pr.Close()
+
+	req, err := http.NewRequest(http.MethodPost, url, pr)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set(headerType, janEncoded) // 表示使用工具上传
+	req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
+	if point {
+		// 告诉服务器断点续传的上传数据
+		req.Header.Set(headPoint, string(strconv.AppendInt(buf[:0], cur, 10)))
+	}
+	if key != "" {
+		// 告诉服务器,加密通信
+		req.Header.Set(encryptFlag, key)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.Body != nil {
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
+		} else {
+			_, _ = io.CopyBuffer(io.Discard, resp.Body, buf)
+		}
+		//goland:noinspection GoUnhandledErrorResult
+		resp.Body.Close()
+	}
+	return nil
+}
+
+func clientGet(url, output string, point bool, buf []byte) error {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	if output == "" {
+		output = filepath.Base(req.URL.Path)
+	}
+
+	fileFlag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	fi, err := os.Stat(output)
+	if err == nil {
+		if fi.IsDir() {
+			return NewWebErr(output + "is dir")
+		}
+		if point {
+			fileFlag = os.O_CREATE | os.O_APPEND
+			sSize := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
+			// 断点续传,设置规定的header,服务器负责解析并处理
+			req.Header.Set("Range", "bytes="+sSize+"-")
+			req.Header.Set(janbarLength, sSize) // 告诉服务器,从哪个位置下载
+		}
+	}
+	fw, err := os.OpenFile(output, fileFlag, fileMode)
+	if err != nil {
+		return err
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer fw.Close()
+
+	var c cipher.Stream
+	if useEncrypt != "" { // 客户端将随机秘钥发到服务器
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	if resp.Body == nil {
+		return NewWebErr("body is null")
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer resp.Body.Close()
+
+	var size, cur int64
+	switch resp.StatusCode {
+	case http.StatusOK: // 刚开始下载
+		size, err = strconv.ParseInt(resp.Header.Get(headerLength), 10, 64)
+		if err != nil {
+			return err
+		}
+	case http.StatusPartialContent:
+		var length int64 // 断点续传,从header中获取位置和总大小
+		_, err = fmt.Sscanf(resp.Header.Get(contentRange),
+			"bytes %d-%d/%d", &cur, &length, &size)
+		if err != nil {
+			return err
+		}
+	case http.StatusRequestedRangeNotSatisfiable:
+		// 已经下载完毕,无需重复下载
+		size, _ = io.CopyBuffer(io.Discard, resp.Body, buf)
+		fmt.Printf("[%d bytes data]\n", size)
+		return nil
+	default:
+		fmt.Printf("StatusCode:%d\n", resp.StatusCode)
+		_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
+		return nil // 打印错误
+	}
+
+	pw := handleWriteReadData(&handleData{
+		cur:       cur,
+		handle:    fw.Write,
+		cipher:    c,
+		hashAfter: true,
+	}, "GET > "+output, size)
+	_, err = io.CopyBuffer(pw, resp.Body, buf)
+	pw.Close()
+	return err
+}
+
 /*----------------------------Client Start 端代码------------------------------*/
