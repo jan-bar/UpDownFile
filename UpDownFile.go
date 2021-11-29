@@ -131,7 +131,7 @@ Get Offset:
     wget -qO - --header "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
 
 Put File:
-	curl -C offset -T C:\tmp.txt http://{{.addr}}/tmp.txt
+    curl -C offset -T C:\tmp.txt http://{{.addr}}/tmp.txt
 `)
 	if err != nil {
 		panic(err)
@@ -367,7 +367,7 @@ func (w *webErr) Error() string {
 }
 
 func scanSize(h http.Header) (start, length, size int64, err error) {
-	var n int
+	var n int // Content-Range: bytes (unit first byte pos) - [last byte pos]/[entity length]
 	n, err = fmt.Sscanf(h.Get("Content-Range"), "bytes %d-%d/%d", &start, &length, &size)
 	if n != 3 {
 		err = fmt.Errorf("scanSize n=%d", n)
@@ -493,8 +493,8 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			e = &webErr{code: http.StatusInternalServerError, msg: err.Error()}
 		}
-		w.WriteHeader(e.code)
 		w.Header().Set(headerType, "text/html;charset=utf-8")
+		w.WriteHeader(e.code)
 		_, _ = w.Write(htmlMsgPrefix)
 		_, _ = w.Write([]byte(e.msg))
 		_, _ = w.Write(htmlMsgSuffix)
@@ -644,20 +644,64 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 
 // 只提供curl断点上传处理逻辑
 func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
+	var (
+		fw   *os.File
+		path = filepath.Join(basePath, r.URL.Path)
+	)
+	//goland:noinspection GoUnhandledErrorResult
+	defer fw.Close()
+
 	cur, _, size, err := scanSize(r.Header)
-	if err != nil {
-		return NewWebErr("")
-	}
+	if err == nil {
+		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode)
+		if err != nil {
+			return err
+		}
 
-	path := filepath.Join(basePath, r.URL.Path)
-	fi, err := os.Stat(path)
-	if err != nil {
-		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+		fi, err := fw.Stat()
+		if err != nil {
+			return err
+		}
+		nSize := fi.Size()
+		if nSize == size {
+			return NewWebErr("file upload is complete")
+		}
+
+		if (cur == 0 && nSize > 0) || cur > nSize {
+			//goland:noinspection HttpUrlsUsage
+			_, _ = fmt.Fprintf(w, "curl -C %d -T file http://%s%s\n", nSize, r.Host, r.URL.Path)
+			return nil
+		}
+
+		_, err = fw.Seek(cur, io.SeekStart)
+		if err != nil {
+			return err
+		}
 	} else {
-		size := fi.Size()
-
+		// 从头上传,从新创建文件
+		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+		if err != nil {
+			return err
+		}
+		size, err = strconv.ParseInt(r.Header.Get(headerLength), 10, 64)
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+
+	pw := handleWriteReadData(&handleData{
+		cur:       cur,
+		handle:    fw.Write,
+		hashAfter: true,
+	}, "PUT > "+path, size)
+	_, err = io.CopyBuffer(pw, r.Body, buf)
+	_ = r.Body.Close()
+	pw.Close() // 关闭相关资源
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(respOk)
+	return err
 }
 
 type handleData struct {
@@ -724,7 +768,7 @@ func (p *handleData) Write(b []byte) (n int, err error) {
 		p.hash.Write(b[:n])
 	}
 	p.add(n)
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Millisecond * 500)
 	return
 }
 
@@ -739,7 +783,7 @@ func (p *handleData) Read(b []byte) (n int, err error) {
 		p.hash.Write(b[:n])
 	}
 	p.add(n)
-	time.Sleep(time.Millisecond * 50)
+	time.Sleep(time.Millisecond * 500)
 	return
 }
 
