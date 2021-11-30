@@ -433,12 +433,21 @@ func md5str(s string) string {
 }
 
 func encryptCipherKey(key string, buf []byte) (string, cipher.Stream, error) {
-	_, err := rand.Read(buf[64:68])
+	unix := time.Now().Unix()
+	buf[60] = byte(unix >> 56)
+	buf[61] = byte(unix >> 48)
+	buf[62] = byte(unix >> 40)
+	buf[63] = byte(unix >> 32)
+	buf[64] = byte(unix >> 24)
+	buf[65] = byte(unix >> 16)
+	buf[66] = byte(unix >> 8)
+	buf[67] = byte(unix) // 存入时间戳,控制有效性
+	_, err := rand.Read(buf[68:72])
 	if err != nil {
 		return "", nil, err
 	}
-	seed := buf[64]
-	tmp := append(buf[64:68], key...) // 搞几个随机数混淆
+	seed := buf[68]
+	tmp := append(buf[60:72], key...) // 搞几个随机数混淆
 	c := new(rc4Cipher).reset(append([]byte{seed}, key...))
 	c.XORKeyStream(buf[1:], tmp)
 	buf[0] = seed // 携带1字节随机数
@@ -454,11 +463,17 @@ func decryptCipherKey(key, enc string, buf []byte) (cipher.Stream, error) {
 		return nil, err
 	}
 
-	if n := len(src) - 1; n > len(key) {
+	if n := len(src) - 1; n >= len(key)+12 {
 		c := new(rc4Cipher).reset(append([]byte{src[0]}, key...))
 		c.XORKeyStream(buf, src[1:])
-		if string(buf[4:n]) == key {
-			return c.reset(buf[:n]), nil
+		if string(buf[12:n]) == key {
+			t := time.Now().Unix() - (int64(buf[7]) | int64(buf[6])<<8 |
+				int64(buf[5])<<16 | int64(buf[4])<<24 | int64(buf[3])<<32 |
+				int64(buf[2])<<40 | int64(buf[1])<<48 | int64(buf[0])<<56)
+			if t < limitKeyTime && t > -limitKeyTime {
+				// 在规定秒时间内的秘钥才有效
+				return c.reset(buf[:n]), nil
+			}
 		}
 	}
 	return nil, NewWebErr("key decrypt error", http.StatusUnauthorized)
@@ -558,6 +573,7 @@ function backSuper() {
 	janbarLength = "Janbar-Length"
 	headPoint    = "Point"   // 标识断点上传
 	encryptFlag  = "Encrypt" // header秘钥
+	limitKeyTime = 10        // 10秒内请求的秘钥才认为有效
 )
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
@@ -572,6 +588,14 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 		err = handleGetFile(w, r, pool.buf)
 	case http.MethodPost:
 		err = handlePostFile(w, r, pool.buf)
+	case http.MethodHead:
+		if enc := r.Header.Get(encryptFlag); useEncrypt == "" {
+			if enc != "" { // 服务器不加密,客户端加密,返回授权错误
+				err = NewWebErr("check encryption", http.StatusUnauthorized)
+			}
+		} else {
+			_, err = decryptCipherKey(useEncrypt, enc, pool.buf)
+		}
 	case http.MethodPut:
 		err = handlePutFile(w, r, pool.buf)
 	default:
@@ -765,31 +789,26 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	}
 
 	var (
-		fw   *os.File
-		path = filepath.Join(basePath, r.URL.Path)
+		fw        *os.File
+		cur, size int64
+		path      = filepath.Join(basePath, r.URL.Path)
 	)
-	//todo 修改为判断文件是否存在那种逻辑
-
-	cur, _, size, err := scanSize(r.Header)
+	fi, err := os.Stat(path)
 	if err == nil {
-		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode)
-		//goland:noinspection GoUnhandledErrorResult
-		defer fw.Close()
-		if err != nil {
-			return err
-		}
+		// 文件存在则校验断点上传的逻辑
+		cur, _, size, err = scanSize(r.Header)
+		if err == nil {
+			fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode)
+			//goland:noinspection GoUnhandledErrorResult
+			defer fw.Close()
+			if err != nil {
+				return err
+			}
 
-		fi, err := fw.Stat()
-		if err != nil {
-			return err
-		}
-		nSize := fi.Size()
-		if nSize == size {
-			return NewWebErr("file upload is complete")
-		}
-
-		if nSize > 0 || cur > 0 {
-			// 两个变量都'= 0'时相当于重新创建,其中一个'> 0'时需要多些判断
+			nSize := fi.Size()
+			if nSize == size {
+				return NewWebErr("file upload is complete")
+			}
 
 			if (cur == 0 && nSize > 0) || cur > nSize {
 				//goland:noinspection HttpUrlsUsage
@@ -803,26 +822,28 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 				return nil
 			}
 
-			if cur > 0 {
+			if cur > 0 { // 从指定位置继续写文件
 				_, err = fw.Seek(cur, io.SeekStart)
 				if err != nil {
 					return err
 				}
 			}
 		}
-	} else {
-		// 重新创建文件并上传
+	}
+
+	if fw == nil {
+		// 没有经过上面断点续传则重新创建文件并上传
 		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
 		//goland:noinspection GoUnhandledErrorResult
 		defer fw.Close()
 		if err != nil {
 			return err
 		}
-
 		size, err = parseInt(r.Header.Get(headerLength))
 		if err != nil {
 			return err
 		}
+		cur = 0
 	}
 
 	pw := handleWriteReadData(&handleData{cur: cur, handle: fw.Write}, "PUT > "+path, size)
@@ -859,16 +880,11 @@ func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
 	p.sumHex = make(chan []byte)
 	p.pool = bytePool.Get().(*poolByte)
 	go func() {
-		var (
-			pCur = "\r" + prefix + " %3d%%"
-			cur  int64
-		)
-		for cur = range p.rate {
-			cur = cur * 100 / size
-			fmt.Printf(pCur, cur)
+		pCur := "\r" + prefix + " %3d%%"
+		for cur := range p.rate {
+			fmt.Printf(pCur, cur*100/size)
 		}
-		//todo 处理截止百分比
-		fmt.Printf(pCur+" %02x\n", cur, <-p.sumHex)
+		fmt.Printf(pCur+" %02x\n", 100, <-p.sumHex)
 		p.sumHex <- nil // 打印完成才能退出
 	}()
 	return p
@@ -946,20 +962,45 @@ func clientMain(args []string) error {
 		return NewWebErr("url is null")
 	}
 
-	buf := bytePool.Get().(*poolByte)
-	defer bytePool.Put(buf)
+	pool := bytePool.Get().(*poolByte)
+	defer bytePool.Put(pool)
 
+	key, c, err := testServer(httpUrl, pool.buf)
+	if err != nil {
+		return err
+	}
+
+	if *data != "" {
+		return clientPost(*data, httpUrl, *point, key, c, pool.buf)
+	}
+	return clientGet(httpUrl, *output, *point, key, c, pool.buf)
+}
+
+func testServer(url string, buf []byte) (key string, c cipher.Stream, err error) {
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return
+	}
 	if useEncrypt != "" {
 		useEncrypt = md5str(useEncrypt)
+		key, c, err = encryptCipherKey(useEncrypt, buf)
+		if err != nil {
+			return
+		}
+		req.Header.Set(encryptFlag, key)
 	}
-	if *data != "" {
-		return clientPost(*data, httpUrl, *point, buf.buf)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
 	}
-	return clientGet(httpUrl, *output, *point, buf.buf)
+	if resp.StatusCode != http.StatusOK {
+		err = NewWebErr("check encryption")
+	}
+	return
 }
 
 // 获取服务器文件大小,用于断点上传功能
-func clientHead(url string) (int64, error) {
+func getServerSize(url string) (int64, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -977,49 +1018,22 @@ func clientHead(url string) (int64, error) {
 	return parseInt(resp.Header.Get(janbarLength))
 }
 
-func clientPost(data, url string, point bool, buf []byte) error {
+func clientPost(data, url string, point bool, key string, c cipher.Stream, buf []byte) error {
 	var (
 		size, cur int64
-		key       string
 		path      string
-		body      io.Reader
-		c         cipher.Stream
+		body      io.ReadSeeker
 		err       error
 	)
-	if useEncrypt != "" {
-		key, c, err = encryptCipherKey(useEncrypt, buf)
-		if err != nil {
-			return err
-		}
 
-		// TODO 先检查一次秘钥是否正确,再发送上传请求
-		req, err := http.NewRequest(http.MethodPost, url, nil)
+	if point { // 断点上传,获取服务器文件大小
+		cur, err = getServerSize(url)
 		if err != nil {
 			return err
 		}
-		req.Header.Set(headerType, janEncoded)
-		req.Header.Set(encryptFlag, key)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode != http.StatusOK {
-			_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
-			_ = resp.Body.Close()
-			return nil
-		}
-		_ = resp.Body.Close()
 	}
 
 	if len(data) > 1 && data[0] == '@' {
-		if point {
-			// 断点上传,获取服务器文件大小
-			cur, err = clientHead(url)
-			if err != nil {
-				return err
-			}
-		}
-
 		path = data[1:]
 		fr, err := os.Open(path)
 		if err != nil {
@@ -1032,24 +1046,22 @@ func clientPost(data, url string, point bool, buf []byte) error {
 		if err != nil {
 			return err
 		}
-		size = fi.Size()
-
-		if cur > 0 {
-			if cur == size {
-				return NewWebErr("file upload is complete")
-			}
-
-			// 断点上传时,将文件定位到指定位置
-			_, err = fr.Seek(cur, io.SeekStart)
-			if err != nil {
-				return err
-			}
-		}
-		body = fr
+		size, body = fi.Size(), fr
 	} else {
 		// 不是文件,则上传一段文本内容
 		sr := strings.NewReader(data)
-		size, path, body = sr.Size(), "<string data>", sr
+		path, size, body = "<string data>", sr.Size(), sr
+	}
+
+	if cur > 0 {
+		if cur >= size {
+			return NewWebErr("file upload is complete")
+		}
+		// 断点上传时,将文件定位到指定位置
+		_, err = body.Seek(cur, io.SeekStart)
+		if err != nil {
+			return err
+		}
 	}
 
 	pr := handleWriteReadData(&handleData{
@@ -1091,7 +1103,7 @@ func clientPost(data, url string, point bool, buf []byte) error {
 	return nil
 }
 
-func clientGet(url, output string, point bool, buf []byte) error {
+func clientGet(url, output string, point bool, key string, c cipher.Stream, buf []byte) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -1121,13 +1133,7 @@ func clientGet(url, output string, point bool, buf []byte) error {
 	//goland:noinspection GoUnhandledErrorResult
 	defer fw.Close()
 
-	var c cipher.Stream
-	if useEncrypt != "" {
-		var key string
-		key, c, err = encryptCipherKey(useEncrypt, buf)
-		if err != nil {
-			return err
-		}
+	if key != "" {
 		req.Header.Set(encryptFlag, key)
 	}
 
