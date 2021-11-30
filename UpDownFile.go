@@ -3,13 +3,16 @@ package main
 import (
 	"crypto/cipher"
 	"crypto/md5"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"hash"
 	"html/template"
 	"io"
 	"io/fs"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -56,7 +59,6 @@ func main() {
 	}
 }
 
-//goland:noinspection HttpUrlsUsage
 func serverMain(args []string) error {
 	myFlag := flag.NewFlagSet(execPath, flag.ExitOnError)
 	myFlag.StringVar(&basePath, "p", ".", "path")
@@ -108,12 +110,15 @@ func serverMain(args []string) error {
 		return err
 	}
 
+	//goland:noinspection HttpUrlsUsage
 	tpl, err := template.New("").Parse(`{{range $i,$v := .urls}}
 url: http://{{$v}}
 {{- end}}
 
 server:
     {{.exec}} -s {{.addr}} -p {{.dir}} -t {{.timeout}}{{if .pass}} -e {{.pass}}{{end}}
+registry:
+    {{.exec}} -s {{.addr}} -reg
 cli get:
     {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} http://{{.addr}}/tmp.txt
 cli post:
@@ -133,7 +138,7 @@ Get Offset:
     wget -qO - --header "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
 
 Put File:
-    curl -C offset -T C:\tmp.txt http://{{.addr}}/tmp.txt
+    curl -C - -T C:\tmp.txt http://{{.addr}}/tmp.txt
 `)
 	if err != nil {
 		return err
@@ -151,6 +156,9 @@ Put File:
 		return err
 	}
 
+	if useEncrypt != "" {
+		useEncrypt = md5str(useEncrypt)
+	}
 	http.HandleFunc("/", upDownFile)
 	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(icoData) // 网页的图标
@@ -213,7 +221,7 @@ func sortDir(dir string, inputType *int) ([]os.FileInfo, error) {
 	sortType := sortDirType(*inputType)
 	if sortType < sortDirTypeByNameAsc || sortType > sortDirTypeByExtDesc {
 		sortType = sortDirTypeByNameAsc
-		*inputType = int(sortDirTypeByNameAsc)
+		*inputType = int(sortType)
 	}
 	f, err := os.Open(dir)
 	if err != nil {
@@ -375,7 +383,85 @@ func scanSize(h http.Header) (first, last, length int64, err error) {
 }
 
 func parseInt(s string) (int64, error) {
-	return strconv.ParseInt(s, 10, 64)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, err // 此时必须返回0,针对忽略err的场景
+	}
+	return n, nil
+}
+
+type rc4Cipher struct {
+	s    [256]uint32
+	x, y uint32
+
+	l int
+
+	i, j, i0, j0, tmp uint8
+}
+
+func (c *rc4Cipher) reset(key []byte) *rc4Cipher {
+	for i := uint32(0); i < 256; i++ {
+		c.s[i] = i
+	}
+	// 初始变量需要做好赋值
+	c.i, c.j, c.j0, c.l = 0, 0, 0, len(key)
+	for i := 0; i < 256; i++ {
+		c.j0 += uint8(c.s[i]) + key[i%c.l]
+		c.s[i], c.s[c.j0] = c.s[c.j0], c.s[i]
+	}
+	c.tmp = uint8(c.s[key[0]])
+	return c
+}
+
+func (c *rc4Cipher) XORKeyStream(dst, src []byte) {
+	c.i0, c.j0 = c.i, c.j
+	for k, v := range src {
+		c.i0++
+		c.x = c.s[c.i0]
+		c.j0 += uint8(c.x)
+		c.y = c.s[c.j0]
+		c.s[c.i0], c.s[c.j0] = c.y, c.x
+		dst[k] = v ^ uint8(c.s[uint8(c.x+c.y)]) ^ c.tmp
+	}
+	c.i, c.j = c.i0, c.j0
+}
+
+func md5str(s string) string {
+	h := md5.New()
+	h.Write([]byte(s)) // 返回16字节的string
+	return string(h.Sum(nil))
+}
+
+func encryptCipherKey(key string, buf []byte) (string, cipher.Stream, error) {
+	_, err := rand.Read(buf[64:68])
+	if err != nil {
+		return "", nil, err
+	}
+	seed := buf[64]
+	tmp := append(buf[64:68], key...) // 搞几个随机数混淆
+	c := new(rc4Cipher).reset(append([]byte{seed}, key...))
+	c.XORKeyStream(buf[1:], tmp)
+	buf[0] = seed // 携带1字节随机数
+	return base64.RawStdEncoding.EncodeToString(buf[:len(tmp)+1]), c.reset(tmp), nil
+}
+
+func decryptCipherKey(key, enc string, buf []byte) (cipher.Stream, error) {
+	if enc == "" {
+		return nil, NewWebErr("must be encrypted", http.StatusUnauthorized)
+	}
+	src, err := base64.RawStdEncoding.DecodeString(enc)
+	if err != nil {
+		return nil, err
+	}
+
+	if n := len(src) - 1; n > len(key) {
+		c := new(rc4Cipher).reset(append([]byte{src[0]}, key...))
+		c.XORKeyStream(buf, src[1:])
+		if string(buf[4:n]) == key {
+			return c.reset(buf[:n]), nil
+		}
+	}
+	return nil, NewWebErr("key decrypt error", http.StatusUnauthorized)
 }
 
 /*---------------------------------End 工具类----------------------------------*/
@@ -386,7 +472,7 @@ const (
 	htmlErrTpl = `<html>
 <head><title>info</title></head>
 <body>
-<div style="text-align: center;">%s</div>
+<div style="text-align: center;">code:%d,msg:%s</div>
 </body>
 </html>`
 
@@ -498,7 +584,7 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set(headerType, "text/html;charset=utf-8")
 		w.WriteHeader(e.code) // 一定要先设置header,再写code,然后写消息体
-		_, _ = fmt.Fprintf(w, htmlErrTpl, e.msg)
+		_, _ = fmt.Fprintf(w, htmlErrTpl, e.code, e.msg)
 	}
 }
 
@@ -572,9 +658,21 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 			return err
 		}
 	} else {
+		var c cipher.Stream
+		if useEncrypt != "" {
+			// 使用加密传输,需要从header中获取秘钥
+			c, err = decryptCipherKey(useEncrypt, r.Header.Get(encryptFlag), buf)
+			if err != nil {
+				return err
+			}
+		}
+
 		// 尝试获取断点下载的位置,获取不到cur=0
 		cur, _ := parseInt(r.Header.Get(janbarLength))
-		pw := handleWriteReadData(&handleData{cur: cur, ResponseWriter: w}, "GET > "+path, fi.Size())
+		pw := handleWriteReadData(&handleData{
+			cur: cur, cipher: c,
+			ResponseWriter: w,
+		}, "GET > "+path, fi.Size())
 		http.ServeFile(pw, r, path) // 支持断点下载
 		pw.Close()
 	}
@@ -604,6 +702,13 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		if err != nil {
 			return err
 		}
+		if useEncrypt != "" {
+			// 使用加密传输,需要从header中获取秘钥
+			c, err = decryptCipherKey(useEncrypt, r.Header.Get(encryptFlag), buf)
+			if err != nil {
+				return err
+			}
+		}
 		// 判断是断点上传,则cur为断点位置
 		cur, err = parseInt(r.Header.Get(headPoint))
 		if err == nil {
@@ -621,6 +726,10 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	}
 	//goland:noinspection GoUnhandledErrorResult
 	defer fr.Close()
+
+	if useEncrypt != "" && c == nil {
+		return NewWebErr("encrypt method must use cli")
+	}
 
 	fw, err := os.OpenFile(path, fileFlag, fileMode)
 	if err != nil {
@@ -651,10 +760,15 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	//goland:noinspection GoUnhandledErrorResult
 	defer r.Body.Close()
 
+	if useEncrypt != "" {
+		return NewWebErr("encrypt method not support curl")
+	}
+
 	var (
 		fw   *os.File
 		path = filepath.Join(basePath, r.URL.Path)
 	)
+	//todo 修改为判断文件是否存在那种逻辑
 
 	cur, _, size, err := scanSize(r.Header)
 	if err == nil {
@@ -674,17 +788,26 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 			return NewWebErr("file upload is complete")
 		}
 
-		if (cur == 0 && nSize > 0) || cur > nSize {
-			//goland:noinspection HttpUrlsUsage, 返回curl断点上传命令
-			_, _ = fmt.Fprintf(w, "curl -C %d -T file http://%s%s\n", nSize, r.Host, r.URL.Path)
-			return nil
-		}
+		if nSize > 0 || cur > 0 {
+			// 两个变量都'= 0'时相当于重新创建,其中一个'> 0'时需要多些判断
 
-		if cur > 0 {
-			// 定到文件指定位置
-			_, err = fw.Seek(cur, io.SeekStart)
-			if err != nil {
-				return err
+			if (cur == 0 && nSize > 0) || cur > nSize {
+				//goland:noinspection HttpUrlsUsage
+				if nSize == 0 {
+					// 返回重建的上传命令
+					_, _ = fmt.Fprintf(w, "curl -T file http://%s%s\n", r.Host, r.URL.Path)
+				} else {
+					// 返回指定位置的上传命令
+					_, _ = fmt.Fprintf(w, "curl -C %d -T file http://%s%s\n", nSize, r.Host, r.URL.Path)
+				}
+				return nil
+			}
+
+			if cur > 0 {
+				_, err = fw.Seek(cur, io.SeekStart)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	} else {
@@ -702,11 +825,7 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		}
 	}
 
-	pw := handleWriteReadData(&handleData{
-		cur:       cur,
-		handle:    fw.Write,
-		hashAfter: true,
-	}, "PUT > "+path, size)
+	pw := handleWriteReadData(&handleData{cur: cur, handle: fw.Write}, "PUT > "+path, size)
 	_, err = io.CopyBuffer(pw, r.Body, buf)
 	pw.Close() // 关闭相关资源
 	if err != nil {
@@ -740,11 +859,16 @@ func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
 	p.sumHex = make(chan []byte)
 	p.pool = bytePool.Get().(*poolByte)
 	go func() {
-		pCur := "\r" + prefix + " %3d%%"
-		for cur := range p.rate {
-			fmt.Printf(pCur, cur*100/size)
+		var (
+			pCur = "\r" + prefix + " %3d%%"
+			cur  int64
+		)
+		for cur = range p.rate {
+			cur = cur * 100 / size
+			fmt.Printf(pCur, cur)
 		}
-		fmt.Printf("\r%s 100%% %02x\n", prefix, <-p.sumHex)
+		//todo 处理截止百分比
+		fmt.Printf(pCur+" %02x\n", cur, <-p.sumHex)
 		p.sumHex <- nil // 打印完成才能退出
 	}()
 	return p
@@ -768,19 +892,20 @@ func (p *handleData) grow(n int) []byte {
 func (p *handleData) Write(b []byte) (n int, err error) {
 	if p.cipher != nil {
 		tmp := p.grow(len(b))
-		n, err = p.handle(tmp)
-		if p.hashAfter {
-			// 使用解密后数据计算hash
-			p.hash.Write(tmp[:n])
-		} else {
-			// 使用加密前数据计算hash
-			p.hash.Write(b[:n])
+		p.cipher.XORKeyStream(tmp, b)
+		if n, err = p.handle(tmp); n > 0 {
+			if p.hashAfter {
+				// 使用解密后数据计算hash
+				p.hash.Write(tmp[:n])
+			} else {
+				// 使用加密前数据计算hash
+				p.hash.Write(b[:n])
+			}
 		}
 	} else if n, err = p.handle(b); n > 0 {
 		p.hash.Write(b[:n])
 	}
 	p.add(n)
-	time.Sleep(time.Millisecond * 500)
 	return
 }
 
@@ -795,7 +920,6 @@ func (p *handleData) Read(b []byte) (n int, err error) {
 		p.hash.Write(b[:n])
 	}
 	p.add(n)
-	time.Sleep(time.Millisecond * 500)
 	return
 }
 
@@ -824,6 +948,10 @@ func clientMain(args []string) error {
 
 	buf := bytePool.Get().(*poolByte)
 	defer bytePool.Put(buf)
+
+	if useEncrypt != "" {
+		useEncrypt = md5str(useEncrypt)
+	}
 	if *data != "" {
 		return clientPost(*data, httpUrl, *point, buf.buf)
 	}
@@ -859,6 +987,28 @@ func clientPost(data, url string, point bool, buf []byte) error {
 		err       error
 	)
 	if useEncrypt != "" {
+		key, c, err = encryptCipherKey(useEncrypt, buf)
+		if err != nil {
+			return err
+		}
+
+		// TODO 先检查一次秘钥是否正确,再发送上传请求
+		req, err := http.NewRequest(http.MethodPost, url, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set(headerType, janEncoded)
+		req.Header.Set(encryptFlag, key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
+			_ = resp.Body.Close()
+			return nil
+		}
+		_ = resp.Body.Close()
 	}
 
 	if len(data) > 1 && data[0] == '@' {
@@ -933,7 +1083,7 @@ func clientPost(data, url string, point bool, buf []byte) error {
 		if resp.StatusCode != http.StatusOK {
 			_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
 		} else {
-			_, _ = io.CopyBuffer(io.Discard, resp.Body, buf)
+			_, _ = io.CopyBuffer(ioutil.Discard, resp.Body, buf)
 		}
 		//goland:noinspection GoUnhandledErrorResult
 		resp.Body.Close()
@@ -972,7 +1122,13 @@ func clientGet(url, output string, point bool, buf []byte) error {
 	defer fw.Close()
 
 	var c cipher.Stream
-	if useEncrypt != "" { // 客户端将随机秘钥发到服务器
+	if useEncrypt != "" {
+		var key string
+		key, c, err = encryptCipherKey(useEncrypt, buf)
+		if err != nil {
+			return err
+		}
+		req.Header.Set(encryptFlag, key)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -1003,7 +1159,6 @@ func clientGet(url, output string, point bool, buf []byte) error {
 		fmt.Printf("[%d bytes data]\n", size)
 		return nil
 	default:
-		fmt.Printf("StatusCode:%d\n", resp.StatusCode)
 		_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
 		return nil // 打印错误
 	}
