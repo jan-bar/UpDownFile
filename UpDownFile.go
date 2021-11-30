@@ -29,6 +29,7 @@ var (
 	bytePool = sync.Pool{New: func() interface{} {
 		return &poolByte{buf: make([]byte, 32<<10)}
 	}}
+	respOk = []byte("ok")
 
 	//go:embed fileServer.ico
 	icoData []byte // 嵌入图标文件
@@ -38,7 +39,6 @@ var (
 	execPath   string // 可执行程序绝对路径
 )
 
-//goland:noinspection HttpUrlsUsage
 func main() {
 	var err error // 获取程序运行路径
 	execPath, err = os.Executable()
@@ -47,39 +47,41 @@ func main() {
 	}
 
 	if len(os.Args) > 2 && os.Args[1] == "cli" {
-		if err = clientMain(); err != nil {
-			fmt.Println(err.Error())
-		}
-		return
+		err = clientMain(os.Args[2:])
+	} else {
+		err = serverMain(os.Args[1:])
 	}
+	if err != nil {
+		fmt.Println(err)
+	}
+}
 
-	flag.StringVar(&basePath, "p", ".", "path")
+//goland:noinspection HttpUrlsUsage
+func serverMain(args []string) error {
+	myFlag := flag.NewFlagSet(execPath, flag.ExitOnError)
+	myFlag.StringVar(&basePath, "p", ".", "path")
 	var addrStr string
-	flag.StringVar(&addrStr, "s", "", "ip:port")
-	flag.StringVar(&useEncrypt, "e", "", "encrypt data")
-	timeout := flag.Duration("t", time.Second*30, "server timeout")
-	reg := flag.Bool("reg", false, "add right click registry")
-	flag.Parse()
+	myFlag.StringVar(&addrStr, "s", "", "ip:port")
+	myFlag.StringVar(&useEncrypt, "e", "", "encrypt data")
+	timeout := myFlag.Duration("t", time.Second*30, "server timeout")
+	reg := myFlag.Bool("reg", false, "add right click registry")
+	_ = myFlag.Parse(args)
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addrStr)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	if *reg {
 		if len(tcpAddr.IP) <= 0 || tcpAddr.Port < 1000 {
-			fmt.Printf("usage: %s -s ip:port -reg\n", execPath)
-		} else {
-			if err = createRegFile(tcpAddr.String()); err != nil {
-				panic(err)
-			}
+			return fmt.Errorf("usage: %s -s ip:port -reg\n", execPath)
 		}
-		return
+		return createRegFile(tcpAddr.String())
 	}
 
 	addr, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	var urls []string
@@ -87,7 +89,7 @@ func main() {
 	if len(tcpAddr.IP) <= 0 {
 		_, port, err := net.SplitHostPort(addrStr)
 		if err != nil {
-			panic(err)
+			return err
 		}
 		// 添加本机所有可用IP,组装Port
 		if ips := InternalIp(); len(ips) > 0 {
@@ -103,7 +105,7 @@ func main() {
 
 	basePath, err = filepath.Abs(basePath)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	tpl, err := template.New("").Parse(`{{range $i,$v := .urls}}
@@ -134,7 +136,7 @@ Put File:
     curl -C offset -T C:\tmp.txt http://{{.addr}}/tmp.txt
 `)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	// 渲染命令行帮助
 	err = tpl.Execute(os.Stdout, map[string]interface{}{
@@ -146,17 +148,14 @@ Put File:
 		"urls":    urls,
 	})
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	http.HandleFunc("/", upDownFile)
 	http.HandleFunc("/favicon.ico", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(icoData) // 网页的图标
 	})
-	err = (&http.Server{ReadHeaderTimeout: *timeout}).Serve(addr)
-	if err != nil {
-		panic(err)
-	}
+	return (&http.Server{ReadHeaderTimeout: *timeout}).Serve(addr)
 }
 
 func createRegFile(addr string) error {
@@ -366,25 +365,31 @@ func (w *webErr) Error() string {
 	return w.msg
 }
 
-func scanSize(h http.Header) (start, length, size int64, err error) {
+func scanSize(h http.Header) (first, last, length int64, err error) {
 	var n int // Content-Range: bytes (unit first byte pos) - [last byte pos]/[entity length]
-	n, err = fmt.Sscanf(h.Get("Content-Range"), "bytes %d-%d/%d", &start, &length, &size)
+	n, err = fmt.Sscanf(h.Get("Content-Range"), "bytes %d-%d/%d", &first, &last, &length)
 	if n != 3 {
 		err = fmt.Errorf("scanSize n=%d", n)
 	}
 	return
 }
 
+func parseInt(s string) (int64, error) {
+	return strconv.ParseInt(s, 10, 64)
+}
+
 /*---------------------------------End 工具类----------------------------------*/
 
 /*----------------------------Server Start 端代码------------------------------*/
-var (
-	htmlMsgPrefix = []byte("<html><head><title>message</title></head><body><center><h2>")
-	htmlMsgSuffix = []byte("</h2></center></body></html>")
-	respOk        = []byte("ok")
-)
 
 const (
+	htmlErrTpl = `<html>
+<head><title>info</title></head>
+<body>
+<div style="text-align: center;">%s</div>
+</body>
+</html>`
+
 	htmlTpl = `<html lang="zh"><head><title>list dir</title></head><body>
 <div style="position:fixed;bottom:20px;right:10px"><p>
 <label><input type="radio" name="sort" onclick="sortDir(0)"{{if eq .sort 0}}checked{{end}}>名称升序</label>
@@ -462,29 +467,27 @@ function backSuper() {
 
 	fileMode     = fs.FileMode(0666)
 	headerType   = "Content-Type"
-	urlencoded   = "application/x-www-form-urlencoded"
 	janEncoded   = "application/janbar" // 使用本工具命令行的头
 	headerLength = "Content-Length"
 	janbarLength = "Janbar-Length"
-	headPoint    = "Point" // 标识断点上传
-	timeLayout   = "2006-01-02 15:04:05"
+	headPoint    = "Point"   // 标识断点上传
 	encryptFlag  = "Encrypt" // header秘钥
 )
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
 	var (
-		err error
-		buf = bytePool.Get().(*poolByte)
+		err  error
+		pool = bytePool.Get().(*poolByte)
 	)
-	defer bytePool.Put(buf)
+	defer bytePool.Put(pool)
 
 	switch r.Method {
 	case http.MethodGet:
-		err = handleGetFile(w, r, buf.buf)
+		err = handleGetFile(w, r, pool.buf)
 	case http.MethodPost:
-		err = handlePostFile(w, r, buf.buf)
+		err = handlePostFile(w, r, pool.buf)
 	case http.MethodPut:
-		err = handlePutFile(w, r, buf.buf)
+		err = handlePutFile(w, r, pool.buf)
 	default:
 		err = NewWebErr(r.Method + " not support")
 	}
@@ -494,10 +497,8 @@ func upDownFile(w http.ResponseWriter, r *http.Request) {
 			e = &webErr{code: http.StatusInternalServerError, msg: err.Error()}
 		}
 		w.Header().Set(headerType, "text/html;charset=utf-8")
-		w.WriteHeader(e.code)
-		_, _ = w.Write(htmlMsgPrefix)
-		_, _ = w.Write([]byte(e.msg))
-		_, _ = w.Write(htmlMsgSuffix)
+		w.WriteHeader(e.code) // 一定要先设置header,再写code,然后写消息体
+		_, _ = fmt.Fprintf(w, htmlErrTpl, e.msg)
 	}
 }
 
@@ -521,7 +522,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		if fi.IsDir() {
 			return NewWebErr("unable to get directory size")
 		}
-		// 获取服务器文件大小,用于断点上传文件
+		// 获取服务器文件大小,用于断点上传文件,会返回curl断点上传命令
 		size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
 		w.Header().Set(janbarLength, size)
 		//goland:noinspection HttpUrlsUsage
@@ -545,7 +546,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 			tmp := lineFileInfo{
 				Index: i + 1,
 				Size:  convertByte(buf[:0], v.Size()),
-				Time:  string(v.ModTime().AppendFormat(buf[:0], timeLayout)),
+				Time:  string(v.ModTime().AppendFormat(buf[:0], "2006-01-02 15:04:05")),
 				Name:  v.Name(),
 			}
 
@@ -572,7 +573,7 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		}
 	} else {
 		// 尝试获取断点下载的位置,获取不到cur=0
-		cur, _ := strconv.ParseInt(r.Header.Get(janbarLength), 10, 64)
+		cur, _ := parseInt(r.Header.Get(janbarLength))
 		pw := handleWriteReadData(&handleData{cur: cur, ResponseWriter: w}, "GET > "+path, fi.Size())
 		http.ServeFile(pw, r, path) // 支持断点下载
 		pw.Close()
@@ -591,20 +592,20 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	)
 
 	switch r.Header.Get(headerType) {
-	case urlencoded:
-		s, err := strconv.ParseInt(r.Header.Get(headerLength), 10, 0)
+	case "application/x-www-form-urlencoded":
+		s, err := parseInt(r.Header.Get(headerLength))
 		if err != nil {
 			return err
 		}
 		// 普通二进制上传文件,消息体直接是文件内容
 		fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
 	case janEncoded:
-		s, err := strconv.ParseInt(r.Header.Get(janbarLength), 10, 0)
+		s, err := parseInt(r.Header.Get(janbarLength))
 		if err != nil {
 			return err
 		}
 		// 判断是断点上传,则cur为断点位置
-		cur, err = strconv.ParseInt(r.Header.Get(headPoint), 10, 64)
+		cur, err = parseInt(r.Header.Get(headPoint))
 		if err == nil {
 			fileFlag = os.O_CREATE | os.O_APPEND
 		}
@@ -644,16 +645,22 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 
 // 只提供curl断点上传处理逻辑
 func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
+	if r.Body == nil {
+		return NewWebErr("body is null")
+	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer r.Body.Close()
+
 	var (
 		fw   *os.File
 		path = filepath.Join(basePath, r.URL.Path)
 	)
-	//goland:noinspection GoUnhandledErrorResult
-	defer fw.Close()
 
 	cur, _, size, err := scanSize(r.Header)
 	if err == nil {
 		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, fileMode)
+		//goland:noinspection GoUnhandledErrorResult
+		defer fw.Close()
 		if err != nil {
 			return err
 		}
@@ -668,22 +675,28 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		}
 
 		if (cur == 0 && nSize > 0) || cur > nSize {
-			//goland:noinspection HttpUrlsUsage
+			//goland:noinspection HttpUrlsUsage, 返回curl断点上传命令
 			_, _ = fmt.Fprintf(w, "curl -C %d -T file http://%s%s\n", nSize, r.Host, r.URL.Path)
 			return nil
 		}
 
-		_, err = fw.Seek(cur, io.SeekStart)
-		if err != nil {
-			return err
+		if cur > 0 {
+			// 定到文件指定位置
+			_, err = fw.Seek(cur, io.SeekStart)
+			if err != nil {
+				return err
+			}
 		}
 	} else {
-		// 从头上传,从新创建文件
+		// 重新创建文件并上传
 		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+		//goland:noinspection GoUnhandledErrorResult
+		defer fw.Close()
 		if err != nil {
 			return err
 		}
-		size, err = strconv.ParseInt(r.Header.Get(headerLength), 10, 64)
+
+		size, err = parseInt(r.Header.Get(headerLength))
 		if err != nil {
 			return err
 		}
@@ -695,7 +708,6 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		hashAfter: true,
 	}, "PUT > "+path, size)
 	_, err = io.CopyBuffer(pw, r.Body, buf)
-	_ = r.Body.Close()
 	pw.Close() // 关闭相关资源
 	if err != nil {
 		return err
@@ -797,13 +809,13 @@ func (p *handleData) Close() {
 /*-----------------------------Server End 端代码-------------------------------*/
 
 /*-----------------------------Client End 端代码-------------------------------*/
-func clientMain() error {
+func clientMain(args []string) error {
 	myFlag := flag.NewFlagSet(execPath+" cli", flag.ExitOnError)
 	data := myFlag.String("d", "", "post data")
 	output := myFlag.String("o", "", "output")
 	point := myFlag.Bool("c", false, "Resumed transfer offset")
 	myFlag.StringVar(&useEncrypt, "e", "", "encrypt data")
-	_ = myFlag.Parse(os.Args[2:])
+	_ = myFlag.Parse(args)
 
 	httpUrl := myFlag.Arg(0)
 	if httpUrl == "" {
@@ -834,7 +846,7 @@ func clientHead(url string) (int64, error) {
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, nil // 服务器没有文件
 	}
-	return strconv.ParseInt(resp.Header.Get(janbarLength), 10, 0)
+	return parseInt(resp.Header.Get(janbarLength))
 }
 
 func clientPost(data, url string, point bool, buf []byte) error {
@@ -885,8 +897,9 @@ func clientPost(data, url string, point bool, buf []byte) error {
 		}
 		body = fr
 	} else {
+		// 不是文件,则上传一段文本内容
 		sr := strings.NewReader(data)
-		size, path, body = sr.Size(), "string data", sr
+		size, path, body = sr.Size(), "<string data>", sr
 	}
 
 	pr := handleWriteReadData(&handleData{
@@ -975,11 +988,11 @@ func clientGet(url, output string, point bool, buf []byte) error {
 	var size, cur int64
 	switch resp.StatusCode {
 	case http.StatusOK: // 刚开始下载
-		size, err = strconv.ParseInt(resp.Header.Get(headerLength), 10, 64)
+		size, err = parseInt(resp.Header.Get(headerLength))
 		if err != nil {
 			return err
 		}
-	case http.StatusPartialContent:
+	case http.StatusPartialContent: // 获取断点位置
 		cur, _, size, err = scanSize(resp.Header)
 		if err != nil {
 			return err
