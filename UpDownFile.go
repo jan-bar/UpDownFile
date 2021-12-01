@@ -64,7 +64,7 @@ func serverMain(args []string) error {
 	myFlag.StringVar(&basePath, "p", ".", "path")
 	var addrStr string
 	myFlag.StringVar(&addrStr, "s", "", "ip:port")
-	myFlag.StringVar(&useEncrypt, "e", "", "encrypt data")
+	myFlag.StringVar(&useEncrypt, "e", "", "password")
 	timeout := myFlag.Duration("t", time.Second*30, "server timeout")
 	reg := myFlag.Bool("reg", false, "add right click registry")
 	_ = myFlag.Parse(args)
@@ -573,7 +573,7 @@ function backSuper() {
 	janbarLength = "Janbar-Length"
 	headPoint    = "Point"   // 标识断点上传
 	encryptFlag  = "Encrypt" // header秘钥
-	limitKeyTime = 10        // 10秒内请求的秘钥才认为有效
+	limitKeyTime = 10        // 有效秒数,注意客户端和服务器时间不一致问题
 )
 
 func upDownFile(w http.ResponseWriter, r *http.Request) {
@@ -949,12 +949,15 @@ func (p *handleData) Close() {
 /*-----------------------------Server End 端代码-------------------------------*/
 
 /*-----------------------------Client End 端代码-------------------------------*/
+var clientHttp *http.Client
+
 func clientMain(args []string) error {
 	myFlag := flag.NewFlagSet(execPath+" cli", flag.ExitOnError)
-	data := myFlag.String("d", "", "post data")
+	data := myFlag.String("d", "", "<raw string> or @tmp.txt")
 	output := myFlag.String("o", "", "output")
 	point := myFlag.Bool("c", false, "Resumed transfer offset")
-	myFlag.StringVar(&useEncrypt, "e", "", "encrypt data")
+	timeout := myFlag.Duration("t", time.Minute, "client timeout")
+	myFlag.StringVar(&useEncrypt, "e", "", "password")
 	_ = myFlag.Parse(args)
 
 	httpUrl := myFlag.Arg(0)
@@ -965,6 +968,7 @@ func clientMain(args []string) error {
 	pool := bytePool.Get().(*poolByte)
 	defer bytePool.Put(pool)
 
+	clientHttp = &http.Client{Timeout: *timeout} // 使用加了超时的client
 	key, c, err := testServer(httpUrl, pool.buf)
 	if err != nil {
 		return err
@@ -976,6 +980,7 @@ func clientMain(args []string) error {
 	return clientGet(httpUrl, *output, *point, key, c, pool.buf)
 }
 
+// 客户端无论如何都要探测一下服务器那边是否有加密
 func testServer(url string, buf []byte) (key string, c cipher.Stream, err error) {
 	req, err := http.NewRequest(http.MethodHead, url, nil)
 	if err != nil {
@@ -989,7 +994,7 @@ func testServer(url string, buf []byte) (key string, c cipher.Stream, err error)
 		}
 		req.Header.Set(encryptFlag, key)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clientHttp.Do(req)
 	if err != nil {
 		return
 	}
@@ -1006,7 +1011,7 @@ func getServerSize(url string) (int64, error) {
 		return 0, err
 	}
 	req.Header.Set(headerType, janEncoded)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clientHttp.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -1087,7 +1092,7 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 		req.Header.Set(encryptFlag, key)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clientHttp.Do(req)
 	if err != nil {
 		return err
 	}
@@ -1137,7 +1142,7 @@ func clientGet(url, output string, point bool, key string, c cipher.Stream, buf 
 		req.Header.Set(encryptFlag, key)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := clientHttp.Do(req)
 	if err != nil {
 		return err
 	}
