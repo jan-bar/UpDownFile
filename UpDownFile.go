@@ -75,7 +75,7 @@ func serverMain(args []string) error {
 	}
 
 	if *reg {
-		if len(tcpAddr.IP) <= 0 || tcpAddr.Port < 1000 {
+		if tcpAddr.Port < 1000 {
 			return fmt.Errorf("usage: %s -s ip:port -reg\n", execPath)
 		}
 		return createRegFile(tcpAddr.String())
