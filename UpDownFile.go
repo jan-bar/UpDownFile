@@ -24,6 +24,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/k0kubun/go-ansi"
+	"github.com/schollz/progressbar/v3"
 )
 
 type poolByte struct{ buf []byte } // 这种方式才能过语法检查
@@ -167,6 +170,7 @@ Put File:
 }
 
 func createRegFile(addr string) error {
+	//goland:noinspection GoBoolExpressions
 	if runtime.GOOS != "windows" {
 		return nil // 仅window下才生成右键快捷键
 	}
@@ -477,6 +481,24 @@ func decryptCipherKey(key, enc string, buf []byte) (cipher.Stream, error) {
 		}
 	}
 	return nil, NewWebErr("key decrypt error", http.StatusUnauthorized)
+}
+
+func ShowProgressbar(max int64, desc string) io.ReadWriteCloser {
+	bar := progressbar.NewOptions64(max,
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetDescription(desc),
+		progressbar.OptionSetWriter(ansi.NewAnsiStdout()),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionThrottle(100*time.Millisecond),
+		progressbar.OptionShowCount(),
+		progressbar.OptionOnCompletion(func() {
+			_, _ = fmt.Fprint(ansi.NewAnsiStdout(), "\n")
+		}),
+		// progressbar.OptionSpinnerType(35),
+		// progressbar.OptionFullWidth(),
+	)
+	_ = bar.RenderBlank()
+	return bar
 }
 
 /*---------------------------------End 工具类----------------------------------*/
@@ -856,6 +878,8 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	return err
 }
 
+// -----------------------------------------------------------------------------
+// 下面是有关数据处理的逻辑
 type handleData struct {
 	http.ResponseWriter
 
@@ -948,7 +972,7 @@ func (p *handleData) Close() {
 
 /*-----------------------------Server End 端代码-------------------------------*/
 
-/*-----------------------------Client End 端代码-------------------------------*/
+/*----------------------------Client Start 端代码------------------------------*/
 var clientHttp *http.Client
 
 func clientMain(args []string) error {
@@ -1185,4 +1209,4 @@ func clientGet(url, output string, point bool, key string, c cipher.Stream, buf 
 	return err
 }
 
-/*----------------------------Client Start 端代码------------------------------*/
+/*-----------------------------Client End 端代码-------------------------------*/
