@@ -483,24 +483,6 @@ func decryptCipherKey(key, enc string, buf []byte) (cipher.Stream, error) {
 	return nil, NewWebErr("key decrypt error", http.StatusUnauthorized)
 }
 
-func ShowProgressbar(max int64, desc string) io.ReadWriteCloser {
-	bar := progressbar.NewOptions64(max,
-		progressbar.OptionSetWidth(15),
-		progressbar.OptionSetDescription(desc),
-		progressbar.OptionSetWriter(ansi.NewAnsiStdout()),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionThrottle(100*time.Millisecond),
-		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() {
-			_, _ = fmt.Fprint(ansi.NewAnsiStdout(), "\n")
-		}),
-		// progressbar.OptionSpinnerType(35),
-		// progressbar.OptionFullWidth(),
-	)
-	_ = bar.RenderBlank()
-	return bar
-}
-
 /*---------------------------------End 工具类----------------------------------*/
 
 /*----------------------------Server Start 端代码------------------------------*/
@@ -716,9 +698,10 @@ func handleGetFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		// 尝试获取断点下载的位置,获取不到cur=0
 		cur, _ := parseInt(r.Header.Get(janbarLength))
 		pw := handleWriteReadData(&handleData{
-			cur: cur, cipher: c,
+			cipher:         c,
 			ResponseWriter: w,
-		}, "GET > "+path, fi.Size())
+			handle:         w.Write,
+		}, "GET > "+path, cur, fi.Size())
 		http.ServeFile(pw, r, path) // 支持断点下载
 		pw.Close()
 	}
@@ -783,11 +766,10 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	}
 
 	pw := handleWriteReadData(&handleData{
-		cur:       cur,
 		handle:    fw.Write,
 		cipher:    c,
 		hashAfter: true,
-	}, "POST> "+path, size)
+	}, "POST> "+path, cur, size)
 	_, err = io.CopyBuffer(pw, fr, buf)
 	_ = fw.Close() // 趁早刷新缓存,因为要计算hash
 	pw.Close()
@@ -868,7 +850,7 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		cur = 0
 	}
 
-	pw := handleWriteReadData(&handleData{cur: cur, handle: fw.Write}, "PUT > "+path, size)
+	pw := handleWriteReadData(&handleData{handle: fw.Write}, "PUT > "+path, cur, size)
 	_, err = io.CopyBuffer(pw, r.Body, buf)
 	pw.Close() // 关闭相关资源
 	if err != nil {
@@ -881,45 +863,39 @@ func handlePutFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 // -----------------------------------------------------------------------------
 // 下面是有关数据处理的逻辑
 type handleData struct {
-	http.ResponseWriter
+	http.ResponseWriter // 为了支持http.ServeFile
 
-	cur       int64
-	rate      chan int64
-	sumHex    chan []byte
-	pool      *poolByte
-	hash      hash.Hash
-	hashAfter bool // true表示加解密后数据计算hash
-	cipher    cipher.Stream
+	pool      *poolByte                // 加解密时复用缓存
+	hash      hash.Hash                // 计算hash对象
+	hashAfter bool                     // true表示加解密后数据计算hash
+	cipher    cipher.Stream            // 服务器和客户端使用加密方式传输
+	bar       *progressbar.ProgressBar // 进度条对象
 	handle    func([]byte) (int, error)
 }
 
-func handleWriteReadData(p *handleData, prefix string, size int64) *handleData {
-	if p.ResponseWriter != nil {
-		// 这个是http服务的写入操作
-		p.handle = p.ResponseWriter.Write
-	}
-
+func handleWriteReadData(p *handleData, prefix string, cur, size int64) *handleData {
 	p.hash = md5.New()
-	p.rate = make(chan int64)
-	p.sumHex = make(chan []byte)
 	p.pool = bytePool.Get().(*poolByte)
-	go func() {
-		pCur := "\r" + prefix + " %3d%%"
-		for cur := range p.rate {
-			fmt.Printf(pCur, cur*100/size)
-		}
-		fmt.Printf(pCur+" %02x\n", 100, <-p.sumHex)
-		p.sumHex <- nil // 打印完成才能退出
-	}()
-	return p
-}
-
-func (p *handleData) add(n int) {
-	p.cur += int64(n)
-	select {
-	case p.rate <- p.cur:
-	default:
+	// 创建进度条对象,使用ansi.NewAnsiStdout解决window终端显示问题
+	p.bar = progressbar.NewOptions64(size,
+		progressbar.OptionSetWidth(15),
+		progressbar.OptionSetDescription(prefix),
+		progressbar.OptionSetWriter(ansi.NewAnsiStdout()),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionThrottle(100*time.Millisecond),
+		progressbar.OptionShowCount(),
+		progressbar.OptionOnCompletion(func() {
+			// 结束时附上文件MD5值,无论加解密与否都是原始文件的MD5值
+			_, _ = fmt.Fprintf(ansi.NewAnsiStdout(), " %x\n", p.hash.Sum(nil))
+		}),
+		// progressbar.OptionSpinnerType(35),
+		// progressbar.OptionFullWidth(),
+	)
+	if cur > 0 {
+		_ = p.bar.Set64(cur)
 	}
+	_ = p.bar.RenderBlank()
+	return p
 }
 
 func (p *handleData) grow(n int) []byte {
@@ -945,7 +921,9 @@ func (p *handleData) Write(b []byte) (n int, err error) {
 	} else if n, err = p.handle(b); n > 0 {
 		p.hash.Write(b[:n])
 	}
-	p.add(n)
+	if err == nil {
+		err = p.bar.Add(n)
+	}
 	return
 }
 
@@ -959,15 +937,15 @@ func (p *handleData) Read(b []byte) (n int, err error) {
 	} else if n, err = p.handle(b); n > 0 {
 		p.hash.Write(b[:n])
 	}
-	p.add(n)
+	if err == nil {
+		err = p.bar.Add(n)
+	}
 	return
 }
 
 func (p *handleData) Close() {
 	bytePool.Put(p.pool)
-	close(p.rate)
-	p.sumHex <- p.hash.Sum(nil)
-	<-p.sumHex // 发送hash结果,确保打印结束
+	_ = p.bar.Close()
 }
 
 /*-----------------------------Server End 端代码-------------------------------*/
@@ -1075,7 +1053,7 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 		if err != nil {
 			return err
 		}
-		size, body = fi.Size(), fr
+		path, size, body = fr.Name(), fi.Size(), fr
 	} else {
 		// 不是文件,则上传一段文本内容
 		sr := strings.NewReader(data)
@@ -1094,10 +1072,9 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 	}
 
 	pr := handleWriteReadData(&handleData{
-		cur:    cur,
 		handle: body.Read,
 		cipher: c,
-	}, "POST> "+path, size)
+	}, "POST> "+path, cur, size)
 	defer pr.Close()
 
 	req, err := http.NewRequest(http.MethodPost, url, pr)
@@ -1199,11 +1176,10 @@ func clientGet(url, output string, point bool, key string, c cipher.Stream, buf 
 	}
 
 	pw := handleWriteReadData(&handleData{
-		cur:       cur,
 		handle:    fw.Write,
 		cipher:    c,
 		hashAfter: true,
-	}, "GET > "+output, size)
+	}, "GET > "+output, cur, size)
 	_, err = io.CopyBuffer(pw, resp.Body, buf)
 	pw.Close()
 	return err
