@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
@@ -12,7 +13,6 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -123,25 +123,27 @@ server:
 registry:
     {{.exec}} -s {{.addr}} -reg
 cli get:
-    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} http://{{.addr}}/tmp.txt
+    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} "http://{{.addr}}/tmp.txt"
 cli post:
-    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} -d @C:\tmp.txt http://{{.addr}}/tmp.txt
+    {{.exec}} cli -c{{if .pass}} -e {{.pass}}{{end}} -d @C:\tmp.txt "http://{{.addr}}/tmp.txt"
 
 Get File:
-    wget -c --content-disposition http://{{.addr}}/tmp.txt
-    curl -C - -OJ http://{{.addr}}/tmp.txt
+    wget -c --content-disposition "http://{{.addr}}/tmp.txt"
+    curl -C - -OJ "http://{{.addr}}/tmp.txt"
 
 Post File:
-    wget -qO - --post-file=C:\tmp.txt http://{{.addr}}/tmp.txt
-    curl --data-binary @C:\tmp.txt http://{{.addr}}/tmp.txt
-    curl -F "file=@C:\tmp.txt" http://{{.addr}}/
+    wget -qO - --post-file=C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    wget -qO - --header="Content-Type: application/x-gzip" --post-file=C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    curl --data-binary @C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    curl -H "Content-Type: application/x-gzip" --data-binary @C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    curl -F "file=@C:\tmp.txt" "http://{{.addr}}/"
 
 Get Offset:
-    curl -H "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
-    wget -qO - --header "Content-Type:application/janbar" http://{{.addr}}/tmp.txt
+    curl -H "Content-Type:application/janbar" "http://{{.addr}}/tmp.txt"
+    wget -qO - --header "Content-Type:application/janbar" "http://{{.addr}}/tmp.txt"
 
 Put File:
-    curl -C - -T C:\tmp.txt http://{{.addr}}/tmp.txt
+    curl -C - -T C:\tmp.txt "http://{{.addr}}/tmp.txt"
 `)
 	if err != nil {
 		return err
@@ -573,6 +575,7 @@ function backSuper() {
 	fileMode     = fs.FileMode(0666)
 	headerType   = "Content-Type"
 	janEncoded   = "application/janbar" // 使用本工具命令行的头
+	headerGzip   = "application/x-gzip"
 	headerLength = "Content-Length"
 	janbarLength = "Janbar-Length"
 	headPoint    = "Point"   // 标识断点上传
@@ -726,6 +729,20 @@ func handlePostFile(w http.ResponseWriter, r *http.Request, buf []byte) error {
 		}
 		// 普通二进制上传文件,消息体直接是文件内容
 		fr, size, path = r.Body, s, filepath.Join(basePath, r.URL.Path)
+	case headerGzip:
+		s, err := parseInt(r.Header.Get(headerLength))
+		if err != nil {
+			return err
+		}
+
+		fr, err = gzip.NewReader(r.Body)
+		//goland:noinspection GoUnhandledErrorResult
+		defer r.Body.Close()
+		if err != nil {
+			return err
+		}
+		// 使用gzip流读取数据,文件大小未知,进度条渲染时特殊处理
+		size, path = s, filepath.Join(basePath, r.URL.Path)
 	case janEncoded:
 		s, err := parseInt(r.Header.Get(janbarLength))
 		if err != nil {
@@ -870,6 +887,7 @@ type handleData struct {
 	hashAfter bool                     // true表示加解密后数据计算hash
 	cipher    cipher.Stream            // 服务器和客户端使用加密方式传输
 	bar       *progressbar.ProgressBar // 进度条对象
+	changeMax bool                     // 是否修改过最大值
 	handle    func([]byte) (int, error)
 }
 
@@ -921,10 +939,19 @@ func (p *handleData) Write(b []byte) (n int, err error) {
 	} else if n, err = p.handle(b); n > 0 {
 		p.hash.Write(b[:n])
 	}
-	if err == nil {
-		err = p.bar.Add(n)
-	}
+	p.add(n, &err)
 	return
+}
+
+func (p *handleData) add(n int, err *error) {
+	if *err == nil {
+		if *err = p.bar.Add(n); *err != nil &&
+			(*err).Error() == "current number exceeds max" {
+			p.bar.ChangeMax64(p.bar.GetMax64() * 2)
+			*err = nil // 当计数值小于最大值,扩大最大值,对于未知最大值时有效
+			p.changeMax = true
+		}
+	}
 }
 
 func (p *handleData) Read(b []byte) (n int, err error) {
@@ -937,14 +964,16 @@ func (p *handleData) Read(b []byte) (n int, err error) {
 	} else if n, err = p.handle(b); n > 0 {
 		p.hash.Write(b[:n])
 	}
-	if err == nil {
-		err = p.bar.Add(n)
-	}
+	p.add(n, &err)
 	return
 }
 
 func (p *handleData) Close() {
 	bytePool.Put(p.pool)
+	if p.changeMax {
+		// 过程中扩大过最大值,因此最终修正最大值为已传输字节数
+		p.bar.ChangeMax64(int64(p.bar.State().CurrentBytes))
+	}
 	_ = p.bar.Close()
 }
 
@@ -960,6 +989,7 @@ func clientMain(args []string) error {
 	point := myFlag.Bool("c", false, "Resumed transfer offset")
 	timeout := myFlag.Duration("t", time.Minute, "client timeout")
 	myFlag.StringVar(&useEncrypt, "e", "", "password")
+	gzipOn := myFlag.Bool("g", false, "gzip file to send")
 	_ = myFlag.Parse(args)
 
 	httpUrl := myFlag.Arg(0)
@@ -977,7 +1007,7 @@ func clientMain(args []string) error {
 	}
 
 	if *data != "" {
-		return clientPost(*data, httpUrl, *point, key, c, pool.buf)
+		return clientPost(*data, httpUrl, *point, *gzipOn, key, c, pool.buf)
 	}
 	return clientGet(httpUrl, *output, *point, key, c, pool.buf)
 }
@@ -1025,20 +1055,13 @@ func getServerSize(url string) (int64, error) {
 	return parseInt(resp.Header.Get(janbarLength))
 }
 
-func clientPost(data, url string, point bool, key string, c cipher.Stream, buf []byte) error {
+func clientPost(data, url string, point, gzipOn bool, key string, c cipher.Stream, buf []byte) error {
 	var (
 		size, cur int64
 		path      string
-		body      io.ReadSeeker
+		body      io.Reader
 		err       error
 	)
-
-	if point { // 断点上传,获取服务器文件大小
-		cur, err = getServerSize(url)
-		if err != nil {
-			return err
-		}
-	}
 
 	if len(data) > 1 && data[0] == '@' {
 		path = data[1:]
@@ -1048,26 +1071,70 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 		}
 		//goland:noinspection GoUnhandledErrorResult
 		defer fr.Close()
+		path = fr.Name()
 
+		if gzipOn {
+			//goland:noinspection GoUnhandledErrorResult
+			tp, err := func() (string, error) {
+				defer fr.Close() // 关闭直接读取文件
+
+				tw, err := os.CreateTemp("", "gzip")
+				if err != nil {
+					return "", err
+				}
+				defer tw.Close() // 关闭临时文件
+
+				gw := gzip.NewWriter(tw)
+				defer gw.Close() // 结束gzip压缩,这个关闭要在文件关闭之前执行
+
+				_, err = io.CopyBuffer(gw, fr, buf)
+				return tw.Name(), err
+			}()
+			//goland:noinspection GoUnhandledErrorResult
+			defer os.Remove(tp)
+			if err != nil {
+				return err
+			}
+
+			// 读取gzip压缩的临时文件
+			fr, err = os.Open(tp)
+			if err != nil {
+				return err
+			}
+			//goland:noinspection GoUnhandledErrorResult
+			defer fr.Close()
+		}
+
+		// 要么获取源文件大小,要么获取gzip压缩后的大小
 		fi, err := fr.Stat()
 		if err != nil {
 			return err
 		}
-		path, size, body = fr.Name(), fi.Size(), fr
+		body, size = fr, fi.Size()
 	} else {
 		// 不是文件,则上传一段文本内容
 		sr := strings.NewReader(data)
 		path, size, body = "<string data>", sr.Size(), sr
 	}
 
-	if cur > 0 {
-		if cur >= size {
-			return NewWebErr("file upload is complete")
-		}
-		// 断点上传时,将文件定位到指定位置
-		_, err = body.Seek(cur, io.SeekStart)
+	if point && !gzipOn {
+		// 断点上传,获取服务器文件大小,启用gzip压缩时不进行断点续传
+		cur, err = getServerSize(url)
 		if err != nil {
 			return err
+		}
+
+		if cur > 0 { // 断点续传得到服务器已有数据
+			if cur >= size {
+				return NewWebErr("file upload is complete")
+			}
+			// 断点上传时,将文件定位到指定位置
+			if bs, ok := body.(io.Seeker); ok {
+				_, err = bs.Seek(cur, io.SeekStart)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 
@@ -1082,15 +1149,21 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 		return err
 	}
 
-	req.Header.Set(headerType, janEncoded) // 表示使用工具上传
-	req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
-	if point {
-		// 告诉服务器断点续传的上传数据
-		req.Header.Set(headPoint, string(strconv.AppendInt(buf[:0], cur, 10)))
-	}
-	if key != "" {
-		// 告诉服务器,加密通信
-		req.Header.Set(encryptFlag, key)
+	// 设置这个值才会在header里面出现,否则只有特殊的3种数据会有,其他时候不会自动出现
+	req.ContentLength = size
+	if gzipOn {
+		req.Header.Set(headerType, headerGzip)
+	} else {
+		req.Header.Set(headerType, janEncoded)
+		req.Header.Set(janbarLength, string(strconv.AppendInt(buf[:0], size, 10)))
+		if point {
+			// 告诉服务器断点续传的上传数据
+			req.Header.Set(headPoint, string(strconv.AppendInt(buf[:0], cur, 10)))
+		}
+		if key != "" {
+			// 告诉服务器,加密通信
+			req.Header.Set(encryptFlag, key)
+		}
 	}
 
 	resp, err := clientHttp.Do(req)
@@ -1101,7 +1174,7 @@ func clientPost(data, url string, point bool, key string, c cipher.Stream, buf [
 		if resp.StatusCode != http.StatusOK {
 			_, _ = io.CopyBuffer(os.Stdout, resp.Body, buf)
 		} else {
-			_, _ = io.CopyBuffer(ioutil.Discard, resp.Body, buf)
+			_, _ = io.CopyBuffer(io.Discard, resp.Body, buf)
 		}
 		//goland:noinspection GoUnhandledErrorResult
 		resp.Body.Close()
