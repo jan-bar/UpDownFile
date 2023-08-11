@@ -1,6 +1,8 @@
 ## UpDownFile
 简易上传下载文件服务器，针对场景为临时需要上传或下载单个文件，完成后直接关闭服务器就完事了。
 
+安装: `go install github.com/jan-bar/UpDownFile@latest`,或者: [releases](https://github.com/jan-bar/UpDownFile/releases)
+
 1. 可以使用url访问，会显示一个简易web页面，可以在这个web页面**上传下载**文件，以及进行文件的排序。  
 2. 也可以使用wget或curl命令行工具上传下载文件，多种选择，总有一个是你想要的方式。  
 3. 支持https方式启动服务器和客户端，传输内容加密，数据更安全  
@@ -14,13 +16,6 @@
 
 ![展示Web页面](ShowWeb.png)
 
-8. 确保文件正确性,增加计算md5值功能,服务器端会自动计算md5值,使用cli工具时也会计算md5值,包括加密传输时也会正确计算md5值。
-```bash
-GET >e:\1.txt 100% 9d684b1f28fbde1b730681673d83530e
-GET >e:\2.jpg 100% f7d3bb804a1fbb12b8eff77785a1bc4c
-POST>e:\dos2unix 100% 3a7237e306544a12b5d0438fadc55f03
-```
-
 执行：`upDownFile -h`，可查看服务端帮助信息：
 ```shell
 Usage of UpDownFile:
@@ -28,6 +23,8 @@ Usage of UpDownFile:
         ca file (default "ca.crt")
   -cert string
         cert file
+  -d string
+        domain name
   -key string
         key file
   -p string
@@ -58,36 +55,34 @@ Usage of UpDownFile cli:
 
 执行：`UpDownFile`会打印辅助信息，里面有使用curl和wget的上传下载文件命令。  
 ```bash
-upDownFile -s 127.0.0.1:8080 -p C:\dir -cert janbar.cert -key janbar.key
+UpDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com
 
-url: http://127.0.0.1:8080
+web service: https://127.0.0.1:443
 
 server:
-    upDownFile.exe -s 127.0.0.1:8080 -p C:\dir -t 1m0s -ca ca.crt -cert janbar.cert -key janbar.key
+    upDownFile.exe -s [::]:443 -p C:\dir -t 1m0s -ca ca.crt -cert janbar.cert -key janbar.key -d janbar.com
 registry:
-    upDownFile.exe -s 127.0.0.1:8080 -reg
+    upDownFile.exe -s [::]:443 -reg
 cli get:
-    upDownFile.exe cli -c -ca ca.crt "http://127.0.0.1:8080/tmp.txt"
+    upDownFile.exe cli -c -ca ca.crt -o C:\example.txt "https://janbar.com/example.txt"
 cli post:
-    upDownFile.exe cli -c -ca ca.crt -d @C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
+    upDownFile.exe cli -c -ca ca.crt -d @C:\example.txt "https://janbar.com/example.txt"
 
 Get File:
-    wget --ca-certificate ca.crt -c --content-disposition "http://127.0.0.1:8080/tmp.txt"
-    curl --cacert ca.crt -C - -OJ "http://127.0.0.1:8080/tmp.txt"
+    wget --ca-certificate ca.crt -c --content-disposition "https://janbar.com/example.txt"
+    curl --cacert ca.crt -C - -OJ "https://janbar.com/example.txt"
 
 Post File:
-    wget --ca-certificate ca.crt -qO - --post-file=C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
-    wget --ca-certificate ca.crt -qO - --header="Content-Type: application/x-gzip" --post-file=C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
-    curl --cacert ca.crt --data-binary @C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
-    curl --cacert ca.crt -H "Content-Type: application/x-gzip" --data-binary @C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
-    curl --cacert ca.crt -F "file=@C:\tmp.txt" "http://127.0.0.1:8080/"
+    wget --ca-certificate ca.crt -qO - --post-file=C:\example.txt "https://janbar.com/example.txt"
+    curl --cacert ca.crt --data-binary @C:\example.txt "https://janbar.com/example.txt"
+    curl --cacert ca.crt -F "file=@C:\example.txt" "https://janbar.com/example.txt/"
 
 Get Offset:
-    curl --cacert ca.crt -H "Content-Type:application/offset" "http://127.0.0.1:8080/tmp.txt"
-    wget --ca-certificate ca.crt -qO - --header "Content-Type:application/offset" "http://127.0.0.1:8080/tmp.txt"
+    curl --cacert ca.crt -H "Content-Type:application/offset" "https://janbar.com/example.txt"
+    wget --ca-certificate ca.crt -qO - --header "Content-Type:application/offset" "https://janbar.com/example.txt"
 
 Put File:
-    curl --cacert ca.crt -C - -T C:\tmp.txt "http://127.0.0.1:8080/tmp.txt"
+    curl --cacert ca.crt -C - -T C:\example.txt "https://janbar.com/example.txt"
 ```
 
 ## 使用详解
@@ -122,7 +117,8 @@ UpDownFile cli -c -d @tmp.txt http://127.0.0.1:8080/tmp.txt
 服务器需要两个文件启动服务: `janbar.key, janbar.cert`  
 客户端需要`ca.crt`信任证书  
 
-windows电脑按图所示添加ca根证书,之后浏览器访问`https://janbar.com`服务器就不会提示不安全  
+windows电脑按图所示添加ca根证书  
+在host中添加`127.0.0.1 janbar.com`之后浏览器访问`https://janbar.com`服务器就不会提示不安全  
 ![load_ca](load_ca.png)
 
 ## 使用gzip上传下载

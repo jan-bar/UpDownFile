@@ -12,17 +12,21 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 func serverMain(exe string, args []string) error {
-	var addrStr, basePath, certFile, keyFile, caFile string
+	var addrStr, domain, basePath, certFile, keyFile, caFile string
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
 	fs.StringVar(&basePath, "p", ".", "path")
 	fs.StringVar(&addrStr, "s", "", "ip:port")
+	fs.StringVar(&domain, "d", "", "domain name")
 	fs.StringVar(&certFile, "cert", "", "cert file")
 	fs.StringVar(&keyFile, "key", "", "key file")
 	fs.StringVar(&caFile, "ca", "ca.crt", "ca file")
@@ -33,14 +37,25 @@ func serverMain(exe string, args []string) error {
 		return err
 	}
 
+	uri := &url.URL{Scheme: schemeHttp}
+	if certFile != "" || keyFile != "" {
+		if certFile == "" {
+			return errors.New("cert file is null")
+		}
+		if keyFile == "" {
+			return errors.New("key file is null")
+		}
+		uri.Scheme = schemeHttps
+	}
+
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addrStr)
 	if err != nil {
 		return err
 	}
 
 	if *reg {
-		if tcpAddr.Port < 1000 {
-			return fmt.Errorf("usage: %s -s ip:port -reg\n", exe)
+		if tcpAddr.Port < 80 {
+			return errors.Errorf("usage: %s -s ip:port -reg\n", exe)
 		}
 		return createRegFile(exe, tcpAddr.String())
 	}
@@ -51,60 +66,66 @@ func serverMain(exe string, args []string) error {
 	}
 
 	var urls []string
-	addrStr = addr.Addr().String()
-	if len(tcpAddr.IP) <= 0 {
-		_, port, err := net.SplitHostPort(addrStr)
-		if err != nil {
-			return err
-		}
-		// 添加本机所有可用IP,组装Port
+	if len(tcpAddr.IP) == 0 {
 		if ips := InternalIp(); len(ips) > 0 {
 			for _, v := range ips {
-				urls = append(urls, v+":"+port)
+				tcpAddr.IP = v // 拼接本机所有ip:port
+				uri.Host = tcpAddr.String()
+				urls = append(urls, uri.String())
 			}
-			addrStr = urls[0] // 取第一个IP作为默认url
 		}
-		urls = append(urls, "127.0.0.1:"+port) // 本地IP也可以
-	} else {
-		urls = []string{addrStr}
+
+		tcpAddr.IP = net.IPv4(127, 0, 0, 1)
 	}
+	uri.Host = tcpAddr.String()
+	urls = append(urls, uri.String())
+
+	if domain == "" {
+		uri.Host = tcpAddr.IP.String()
+	} else {
+		uri.Host = domain
+	}
+
+	if !((uri.Scheme == schemeHttp && tcpAddr.Port == 80) ||
+		(uri.Scheme == schemeHttps && tcpAddr.Port == 443)) {
+		// 不是特殊协议和端口,需要拼接端口,特殊协议不需要带上端口
+		uri.Host = net.JoinHostPort(uri.Host, strconv.Itoa(tcpAddr.Port))
+	}
+	addrStr = uri.String()
 
 	basePath, err = filepath.Abs(basePath)
 	if err != nil {
 		return err
 	}
 
-	//goland:noinspection HttpUrlsUsage
 	tpl, err := template.New("").Parse(`{{range $i,$v := .urls}}
-url: http://{{$v}}
+web service: {{$v}}
 {{- end}}
 
 server:
-    {{.exec}} -s {{.addr}} -p {{.dir}} -t {{.timeout}} -ca {{.ca}}{{if .cert}} -cert {{.cert}}{{end}}{{if .key}} -key {{.key}}{{end}}
+    {{.exec}} -s {{.listen}} -p {{.dir}} -t {{.timeout}}{{if .cert}} -ca {{.ca}} -cert {{.cert}}{{end}}{{if .key}} -key {{.key}}{{end}}{{if .domain}} -d {{.domain}}{{end}}
 registry:
-    {{.exec}} -s {{.addr}} -reg
+    {{.exec}} -s {{.listen}} -reg
 cli get:
-    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} "http://{{.addr}}/tmp.txt"
+    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} -o C:\{{.example}} "{{.addr}}/{{.example}}"
 cli post:
-    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} -d @C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} -d @C:\{{.example}} "{{.addr}}/{{.example}}"
 
 Get File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-c --content-disposition "http://{{.addr}}/tmp.txt"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -OJ "http://{{.addr}}/tmp.txt"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-c --content-disposition "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -OJ "{{.addr}}/{{.example}}"
 
 Post File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --post-file=C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --post-file=C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}--data-binary @C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}--data-binary @C:\tmp.txt "http://{{.addr}}/tmp.txt"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-F "file=@C:\tmp.txt" "http://{{.addr}}/"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --post-file=C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}--data-binary @C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-F "file=@C:\{{.example}}" "{{.addr}}/{{.example}}/"
 
 Get Offset:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-H "Content-Type:application/offset" "http://{{.addr}}/tmp.txt"
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --header "Content-Type:application/offset" "http://{{.addr}}/tmp.txt"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-H "Content-Type:application/offset" "{{.addr}}/{{.example}}"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --header "Content-Type:application/offset" "{{.addr}}/{{.example}}"
 
 Put File:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -T C:\tmp.txt "http://{{.addr}}/tmp.txt"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -T C:\{{.example}} "{{.addr}}/{{.example}}"
 
 `)
 	if err != nil {
@@ -113,10 +134,13 @@ Put File:
 
 	err = tpl.Execute(os.Stdout, map[string]any{
 		"exec":    exe,
+		"listen":  addr.Addr().String(),
+		"urls":    urls,
 		"addr":    addrStr,
+		"domain":  domain,
+		"example": "example.txt",
 		"dir":     basePath,
 		"timeout": timeout.String(),
-		"urls":    urls,
 		"cert":    certFile,
 		"key":     keyFile,
 		"ca":      caFile,
@@ -126,35 +150,40 @@ Put File:
 	}
 
 	srv := &http.Server{
-		Addr:              addrStr,
-		Handler:           &fileServer{path: basePath},
+		Addr: addrStr,
+		Handler: &fileServer{
+			path:   basePath,
+			pBar:   newMpbProgress(),
+			scheme: uri.Scheme,
+		},
 		ReadTimeout:       *timeout,
 		ReadHeaderTimeout: *timeout,
 	}
 
-	if certFile != "" || keyFile != "" {
-		if certFile == "" {
-			return errors.New("cert file is null")
-		}
-		if keyFile == "" {
-			return errors.New("key file is null")
-		}
+	if uri.Scheme == schemeHttps {
 		return srv.ServeTLS(addr, certFile, keyFile)
 	}
 	return srv.Serve(addr)
 }
 
 type fileServer struct {
-	path string
+	path   string
+	pBar   *mpb.Progress
+	scheme string
 }
 
 const (
 	headerType   = "Content-Type"
 	headerLength = "Content-Length"
+	headerRange  = "Range"
 	offsetLength = "Offset-Length"
+	offsetAppend = "append"
 	typeDefault  = "application/x-www-form-urlencoded" // curl,wget默认
 	typeGzip     = "application/x-gzip"
 	typeOffset   = "application/offset"
+
+	schemeHttp  = "http"
+	schemeHttps = "https"
 )
 
 var (
@@ -162,6 +191,11 @@ var (
 )
 
 func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		//goland:noinspection GoUnhandledErrorResult
+		defer r.Body.Close()
+	}
+
 	var err error
 	if r.RequestURI == "/favicon.ico" {
 		_, err = w.Write(icoData) // 返回网页的图标
@@ -174,6 +208,8 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			err = fs.get(w, r, pool.buf)
 		case http.MethodPost:
 			err = fs.post(w, r, pool.buf)
+		case http.MethodHead:
+			err = fs.head(w, r)
 		case http.MethodPut:
 			err = fs.put(w, r, pool.buf)
 		default:
@@ -184,26 +220,46 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var e *webErr
 		if !errors.As(err, &e) {
-			e = &webErr{code: http.StatusInternalServerError, err: err}
+			e = &webErr{err: err}
 		}
 		// 先设置header,再写code,然后写消息体
 		w.Header().Set(headerType, "text/plain;charset=utf-8")
-		if e.code == 0 {
-			e.code = http.StatusOK
-		}
-		w.WriteHeader(e.code)
-		_, _ = fmt.Fprintf(w, "code: %d\n\nmsg: %s\n\n%+v", e.code, e.msg, e.err)
+		_, _ = fmt.Fprintf(w, "msg: %s\n\n%+v", e.msg, e.err)
 	}
 }
 
 type webErr struct {
-	code int
-	msg  string
-	err  error
+	err error
+	msg string
 }
 
 func (w *webErr) Error() string {
 	return w.msg
+}
+
+func (fs *fileServer) open(r *http.Request) (fr *os.File, fi os.FileInfo, err error) {
+	fr, err = os.Open(filepath.Join(fs.path, r.URL.Path))
+	if err != nil {
+		err = &webErr{err: errors.WithStack(err)}
+		return
+	}
+
+	fi, err = fr.Stat()
+	if err != nil {
+		_ = fr.Close()
+		err = &webErr{err: errors.WithStack(err)}
+	}
+	return
+}
+
+func (fs *fileServer) head(w http.ResponseWriter, r *http.Request) error {
+	fr, fi, err := fs.open(r)
+	if err != nil {
+		return err
+	}
+	http.ServeContent(w, r, fr.Name(), fi.ModTime(), fr)
+	_ = fr.Close()
+	return nil
 }
 
 // 浏览器获取目录时显示一个简易的web页面
@@ -228,11 +284,11 @@ var dirHtmlTpl = template.Must(template.New("").Parse(`<html lang="zh"><head><ti
 <a href="#top" style="margin:5px">顶部</a>
 <a href="#bottom">底部</a>
 </div>
-
+<style>td:nth-child(3){text-align:right}</style>
 <table border="1" align="center">
 <tr><th>序号</th><th>类型</th><th>大小</th><th>修改时间</th><th>链接</th></tr>
 {{- range $i,$v := .info}}
-<tr><td>{{$v.Index}}</td><td>{{$v.Type}}</td><td>{{$v.Size}}</td><td>{{$v.Time}}</td><td><a href="{{$v.Href}}" download>{{$v.Name}}</a></td></tr>
+<tr><td>{{$v.Index}}</td><td>{{$v.Type}}</td><td>{{$v.Size}}</td><td>{{$v.Time}}</td><td><a href="{{$v.Href}}"{{if eq $v.Type "F"}}download{{end}}>{{$v.Name}}</a></td></tr>
 {{- end}}
 </table>
 
@@ -282,45 +338,31 @@ function backSuper() {
 	window.location.href = window.location.origin + url.substring(0,i+1)
 }</script></body></html>`))
 
-func (fs *fileServer) respUrl(r *http.Request) string {
-	u := &url.URL{Scheme: "http", Host: r.Host, Path: r.RequestURI}
-	if r.TLS != nil {
-		u.Scheme = "https"
-	}
-	return u.String()
-}
-
-//goland:noinspection GoUnhandledErrorResult
 func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) error {
-	if r.Body != nil {
-		defer r.Body.Close()
-	}
-
-	path := filepath.Join(fs.path, r.URL.Path)
-	fi, err := os.Stat(path)
+	fr, fi, err := fs.open(r)
 	if err != nil {
-		return &webErr{
-			code: http.StatusNotFound,
-			msg:  path + " not found",
-			err:  errors.WithStack(err),
-		}
+		return err
 	}
+	//goland:noinspection GoUnhandledErrorResult
+	defer fr.Close()
+
+	size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
+	w.Header().Set(offsetLength, size) // 返回自定义文件大小
 
 	ht := r.Header.Get(headerType)
 	if ht == typeOffset {
 		if fi.IsDir() {
 			return &webErr{msg: "unable to get directory size"}
 		}
-		// 获取服务器文件大小,用于断点上传文件,会返回curl断点上传命令
-		size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
-		w.Header().Set(offsetLength, size)
-		// 组装curl断点上传的命令,返回给客户端直接执行
-		_, err = fmt.Fprintf(w, "curl -C %s -T file %s\n", size, fs.respUrl(r))
+		// 返回断点上传curl命令,客户端可直接执行该命令
+		uri := &url.URL{Scheme: fs.scheme, Host: r.Host, Path: r.RequestURI}
+		_, err = fmt.Fprintf(w, "curl -C %s -T %s %s\n", size, filepath.Base(uri.Path), uri.String())
 		return err
 	}
 
-	if fi.IsDir() {
-		dir, sortNum, err := fs.sortDir(path, r.FormValue("sort"))
+	switch {
+	case fi.IsDir():
+		dir, sortNum, err := fs.sortDir(fr, r.FormValue("sort"))
 		if err != nil {
 			return &webErr{
 				msg: "sort dir",
@@ -329,18 +371,19 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 		}
 
 		type lineFileInfo struct {
-			Index      int
-			Type       string
-			Size       string
-			Time       string
-			Href, Name string
+			Type  string
+			Size  string
+			Time  string
+			Href  string
+			Name  string
+			Index int
 		}
 
 		info := make([]lineFileInfo, len(dir))
 		for i, v := range dir {
 			tmp := lineFileInfo{
 				Index: i + 1,
-				Size:  convertByte(buf[:0], v.Size()),
+				Size:  convertByte(v.Size(), false),
 				Time:  string(v.ModTime().AppendFormat(buf[:0], time.DateTime)),
 				Name:  v.Name(),
 			}
@@ -366,30 +409,85 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 				err: errors.WithStack(err),
 			}
 		}
-	} else if ht == typeGzip {
-		fr, err := os.Open(path)
-		if err != nil {
-			return &webErr{
-				msg: "os.Open",
-				err: errors.WithStack(err),
-			}
-		}
-
+	case ht == typeGzip:
 		gw, _ := gzip.NewWriterLevel(w, gzip.BestCompression)
-		_, err = io.CopyBuffer(gw, fr, buf)
-		gw.Close()
-		fr.Close()
+		pw := &progressBar{w: gw, b: newMpbBar(fs.pBar, http.MethodGet, fr.Name(), fi.Size())}
+		_, err = io.CopyBuffer(pw, fr, buf)
+		pw.Close()
+		_ = gw.Close()
 		if err != nil {
 			return &webErr{
 				msg: "io.CopyBuffer",
 				err: errors.WithStack(err),
 			}
 		}
-	} else {
-		// todo 显示下载进度条
-		http.ServeFile(w, r, path) // 支持断点下载
+	default:
+		pb := newMpbBar(fs.pBar, http.MethodGet, fr.Name(), 0)
+		pw := &progressBar{ResponseWriter: w, w: w, b: pb, fn: func() {
+			t, e := parseInt64(w.Header().Get(headerLength))
+			pb.SetTotal(t, e != nil) // 延迟设置进度条,适应分片下载逻辑
+		}}
+		http.ServeContent(pw, r, fr.Name(), fi.ModTime(), fr)
+		pw.Close()
 	}
 	return nil
+}
+
+func newMpbProgress() *mpb.Progress {
+	return mpb.New(
+		mpb.WithWidth(30),
+		mpb.PopCompletedMode(), // 进度条完成后不再渲染
+		mpb.WithAutoRefresh(),
+	)
+}
+func newMpbBar(bar *mpb.Progress, mode, path string, size int64) *mpb.Bar {
+	return bar.AddBar(size, mpb.AppendDecorators(
+		decor.Any(func(st decor.Statistics) string {
+			var p int64
+			switch {
+			case st.Total <= 0:
+			case st.Current >= st.Total:
+				p = 100
+			default:
+				p = 100 * st.Current / st.Total
+			}
+
+			cur := convertByte(st.Current, true)
+			if st.Completed {
+				return fmt.Sprintf("done %s %s %s", cur, mode, path)
+			}
+			return fmt.Sprintf("%3d%% %s %s %s", p, cur, mode, path)
+		}, decor.WCSyncWidth),
+	))
+}
+
+type progressBar struct {
+	http.ResponseWriter
+	fn func()
+
+	w io.Writer
+	r io.Reader
+	b *mpb.Bar
+}
+
+func (pb *progressBar) Write(p []byte) (n int, err error) {
+	if pb.fn != nil {
+		pb.fn() // execute only once
+		pb.fn = nil
+	}
+
+	n, err = pb.w.Write(p)
+	pb.b.IncrBy(n)
+	return
+}
+func (pb *progressBar) Read(p []byte) (n int, err error) {
+	n, err = pb.r.Read(p)
+	pb.b.IncrBy(n)
+	return
+}
+func (pb *progressBar) Close() {
+	pb.b.Abort(false)
+	pb.b.EnableTriggerComplete()
 }
 
 const (
@@ -476,20 +574,12 @@ func (d *dirSort) Swap(x, y int) {
 	d.fi[x], d.fi[y] = d.fi[y], d.fi[x]
 }
 
-func (fs *fileServer) sortDir(dir string, s string) (list []os.FileInfo, st int, err error) {
+func (fs *fileServer) sortDir(dir *os.File, s string) (list []os.FileInfo, st int, err error) {
 	st, _ = strconv.Atoi(s)
 	if st < sortDirTypeByNameAsc || st > sortDirTypeByExtDesc {
 		st = sortDirTypeByNameAsc
 	}
-
-	var fr *os.File
-	fr, err = os.Open(dir)
-	if err != nil {
-		return
-	}
-
-	list, err = fr.Readdir(-1)
-	_ = fr.Close()
+	list, err = dir.Readdir(-1)
 	if err != nil {
 		return
 	}
@@ -497,59 +587,65 @@ func (fs *fileServer) sortDir(dir string, s string) (list []os.FileInfo, st int,
 	return
 }
 
-//goland:noinspection GoUnhandledErrorResult
-func (fs *fileServer) post(w http.ResponseWriter, r *http.Request, buf []byte) error {
+func (fs *fileServer) post(w io.Writer, r *http.Request, buf []byte) error {
 	if r.Body == nil {
 		return &webErr{msg: "body is null"}
 	}
 
 	var (
-		path string
+		path = filepath.Join(fs.path, r.URL.Path)
 		fr   io.ReadCloser
 		err  error
-
-		size, cur int64
-		fileFlag  = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+		size int64
+		fg   = flagW
 	)
 
-	switch r.Header.Get(headerType) {
+	switch ht := r.Header.Get(headerType); ht {
 	case typeDefault: // curl,wget,cli 这三种方式上传
 		size, err = parseInt64(r.Header.Get(headerLength))
 		if err != nil {
 			return err
 		}
 
-		cur, err = parseInt64(r.Header.Get(offsetLength))
-		if err == nil {
-			fileFlag = os.O_CREATE | os.O_APPEND
+		if r.Header.Get(offsetLength) == offsetAppend {
+			fg = flagA // 客户端告诉服务器断点上传
 		}
 
-		// 普通二进制上传文件,消息体直接是文件内容
-		fr, path = r.Body, filepath.Join(fs.path, r.URL.Path)
-	case typeGzip: // 上传gzip文件,服务器自动解压
+		fr = r.Body
+	case typeGzip:
 		fr, err = gzip.NewReader(r.Body)
-		defer r.Body.Close()
 		if err != nil {
 			return err
 		}
-		path = filepath.Join(fs.path, r.URL.Path)
+		// 服务器解析gzip数据,直接使用自定义长度
+		size, err = parseInt64(r.Header.Get(offsetLength))
 	default:
+		if !strings.HasPrefix(ht, "multipart/form-data;") {
+			return &webErr{
+				msg: fmt.Sprintf("%s:%s not support", headerType, ht),
+			}
+		}
+
 		rf, rh, err := r.FormFile("file")
 		if err != nil {
 			return err
 		}
-		// 使用浏览器上传 或 curl -F "file=@C:\tmp.txt",这两种方式
-		fr, size, path = rf, rh.Size, filepath.Join(fs.path, r.URL.Path, rh.Filename)
+		// 浏览器上传 或 curl -F "file=@xx"
+		// r.FormFile 会先把文件下载好,下面只是复制,因此进度条已客户端为准
+		fr, size = rf, rh.Size
+		path = filepath.Join(path, rh.Filename)
 	}
+	//goland:noinspection GoUnhandledErrorResult
 	defer fr.Close()
 
-	fw, err := os.OpenFile(path, fileFlag, fileMode)
+	fw, err := os.OpenFile(path, fg, fileMode)
 	if err != nil {
 		return err
 	}
-	fmt.Println(size, cur)
 
-	_, err = io.CopyBuffer(fw, fr, buf)
+	pw := &progressBar{w: fw, b: newMpbBar(fs.pBar, http.MethodPost, path, size)}
+	_, err = io.CopyBuffer(pw, fr, buf)
+	pw.Close()
 	_ = fw.Close()
 	if err != nil {
 		return err
@@ -558,17 +654,16 @@ func (fs *fileServer) post(w http.ResponseWriter, r *http.Request, buf []byte) e
 	return err
 }
 
-//goland:noinspection GoUnhandledErrorResult,HttpUrlsUsage
-func (fs *fileServer) put(w http.ResponseWriter, r *http.Request, buf []byte) error {
+func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 	if r.Body == nil {
 		return &webErr{msg: "body is null"}
 	}
-	defer r.Body.Close()
 
 	var (
-		fw        *os.File
-		cur, size int64
-		path      = filepath.Join(fs.path, r.URL.Path)
+		fw   *os.File
+		cur  int64
+		size int64
+		path = filepath.Join(fs.path, r.URL.Path)
 	)
 
 	fi, err := os.Stat(path)
@@ -579,19 +674,21 @@ func (fs *fileServer) put(w http.ResponseWriter, r *http.Request, buf []byte) er
 			if err != nil {
 				return err
 			}
+			//goland:noinspection GoUnhandledErrorResult
 			defer fw.Close()
 
 			nSize := fi.Size()
-			if nSize == size {
+			if nSize <= size {
 				return &webErr{msg: "file upload is complete"}
 			}
 
 			// 需要返回客户端断点上传的命令,指定文件偏移
 			if (cur == 0 && nSize > 0) || cur > nSize {
-				if resp := fs.respUrl(r); nSize == 0 {
-					_, err = fmt.Fprintf(w, "curl -T file %s\n", resp)
+				uri := (&url.URL{Scheme: fs.scheme, Host: r.Host, Path: r.RequestURI}).String()
+				if nSize == 0 {
+					_, err = fmt.Fprintf(w, "curl -T file %s\n", uri)
 				} else {
-					_, err = fmt.Fprintf(w, "curl -C %d -T file %s\n", nSize, resp)
+					_, err = fmt.Fprintf(w, "curl -C %d -T file %s\n", nSize, uri)
 				}
 				return err
 			}
@@ -606,20 +703,22 @@ func (fs *fileServer) put(w http.ResponseWriter, r *http.Request, buf []byte) er
 	}
 
 	if fw == nil {
-		fw, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+		fw, err = os.OpenFile(path, flagW, fileMode)
 		if err != nil {
 			return err
 		}
+		//goland:noinspection GoUnhandledErrorResult
 		defer fw.Close()
-
-		size, err = parseInt64(r.Header.Get(headerLength))
-		if err != nil {
-			return err
-		}
-		cur = 0
 	}
 
-	_, err = io.CopyBuffer(fw, r.Body, buf)
+	size, err = parseInt64(r.Header.Get(headerLength))
+	if err != nil {
+		return err
+	}
+
+	pw := &progressBar{w: fw, b: newMpbBar(fs.pBar, http.MethodPut, path, size)}
+	_, err = io.CopyBuffer(pw, r.Body, buf)
+	pw.Close()
 	if err != nil {
 		return err
 	}
