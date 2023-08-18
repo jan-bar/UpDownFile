@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,7 +39,26 @@ func clientMain(exe string, args []string) error {
 		return errors.New("url is null")
 	}
 
-	client.client = &http.Client{Timeout: *timeout}
+	// 最小时间和http.DefaultTransport保持一致
+	limitTime := func(d, limit time.Duration) time.Duration {
+		if d < limit {
+			return limit
+		}
+		return d
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   limitTime(*timeout/2, 30*time.Second),
+			KeepAlive: limitTime(*timeout/2, 30*time.Second),
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       limitTime(*timeout*2, 90*time.Second),
+		TLSHandshakeTimeout:   limitTime(*timeout/6, 10*time.Second),
+		ExpectContinueTimeout: limitTime(*timeout/60, time.Second),
+	}
+
 	// 证书配置,可以忽略证书,也可以携带ca.crt证书
 	if *insecure || *caCert != "" {
 		var root *x509.CertPool
@@ -52,13 +72,12 @@ func clientMain(exe string, args []string) error {
 			root.AppendCertsFromPEM(pemCerts)
 		}
 
-		client.client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: *insecure,
-				RootCAs:            root,
-			},
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: *insecure,
+			RootCAs:            root,
 		}
 	}
+	client.client = &http.Client{Timeout: *timeout, Transport: transport}
 
 	pool := bytePool.Get().(*poolByte)
 	defer bytePool.Put(pool)
