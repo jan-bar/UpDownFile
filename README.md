@@ -85,6 +85,8 @@ Put File:
     curl --cacert ca.crt -C - -T C:\example.txt "https://janbar.com/example.txt"
 ```
 
+不用改host的测试命令: `curl --resolve "janbar.com:443:127.0.0.1" --resolve "janbar.com:80:127.0.0.1" https://janbar.com`
+
 ## 使用详解
 正常的上传下载没啥可说的,可以通过web页面也可以通过curl或wget命令。  
 但是断点上传的功能我只找到了curl命令支持,不过需要指定上传断点位置。  
