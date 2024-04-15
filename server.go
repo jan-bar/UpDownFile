@@ -381,7 +381,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 	defer fr.Close()
 
 	size := fi.Size()
-	w.Header().Set(offsetLength, string(strconv.AppendInt(buf[:10], size, 10)))
+	w.Header().Set(offsetLength, string(strconv.AppendInt(buf[:0], size, 10)))
 
 	ht := r.Header.Get(headerType)
 	if ht == typeOffset {
