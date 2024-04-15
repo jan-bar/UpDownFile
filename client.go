@@ -117,7 +117,7 @@ type fileClient struct {
 }
 
 func (fc *fileClient) getServerFileSize(url string) (int64, error) {
-	req, err := fc.newRequest(http.MethodGet, url, nil)
+	req, err := fc.newRequest(http.MethodGet, url, nil, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -144,10 +144,14 @@ func (fc *fileClient) getServerFileSize(url string) (int64, error) {
 	}
 }
 
-func (fc *fileClient) newRequest(method, url string, body io.Reader) (*http.Request, error) {
+func (fc *fileClient) newRequest(method, url string, body io.Reader, hd http.Header) (*http.Request, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return nil, err
+	}
+
+	if hd != nil {
+		req.Header = hd
 	}
 
 	if fc.user != "" && fc.pass != "" {
@@ -221,11 +225,10 @@ func (fc *fileClient) post() error {
 		size, body = sr.Size(), sr // 推送字符串到服务器
 	}
 
-	req, err := fc.newRequest(http.MethodPost, fc.httpUrl, body)
+	req, err := fc.newRequest(http.MethodPost, fc.httpUrl, body, hd)
 	if err != nil {
 		return err
 	}
-	req.Header = hd
 	req.ContentLength = size // req.Header.Set(headerLength, "size")
 
 	resp, err := fc.client.Do(req)
@@ -244,7 +247,7 @@ func (fc *fileClient) post() error {
 }
 
 func (fc *fileClient) get() error {
-	req, err := fc.newRequest(http.MethodGet, fc.httpUrl, nil)
+	req, err := fc.newRequest(http.MethodGet, fc.httpUrl, nil, nil)
 	if err != nil {
 		return err
 	}
