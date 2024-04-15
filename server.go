@@ -240,6 +240,21 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !errors.As(err, &e) {
 			e = &webErr{err: err}
 		}
+
+		if errors.Is(e.err, os.ErrNotExist) {
+			w.Header().Set(headerType, "text/html;charset=utf-8")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprintf(w, `<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr>
+<center>%v</center>
+</body>
+</html>`, e.err)
+			return
+		}
+
 		// 先设置header,再写code,然后写消息体
 		w.Header().Set(headerType, "text/plain;charset=utf-8")
 		_, _ = fmt.Fprintf(w, "msg: %s\n\n%+v", e.msg, e.err)
@@ -696,7 +711,7 @@ func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 			defer fw.Close()
 
 			nSize := fi.Size()
-			if nSize <= size {
+			if nSize >= size {
 				return &webErr{msg: "file upload is complete"}
 			}
 
