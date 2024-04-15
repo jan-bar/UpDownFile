@@ -379,18 +379,14 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 	//goland:noinspection GoUnhandledErrorResult
 	defer fr.Close()
 
-	size := string(strconv.AppendInt(buf[:0], fi.Size(), 10))
-	w.Header().Set(offsetLength, size) // 返回自定义文件大小
+	w.Header().Set(offsetLength, string(strconv.AppendInt(buf[:0], fi.Size(), 10)))
 
 	ht := r.Header.Get(headerType)
 	if ht == typeOffset {
 		if fi.IsDir() {
 			return &webErr{msg: "unable to get directory size"}
 		}
-		// 返回断点上传curl命令,客户端可直接执行该命令
-		uri := &url.URL{Scheme: fs.scheme, Host: r.Host, Path: r.RequestURI}
-		_, err = fmt.Fprintf(w, "curl -C %s -T %s %s\n", size, filepath.Base(uri.Path), uri.String())
-		return err
+		return fs.offset(w, r, fi.Size())
 	}
 
 	switch {
@@ -717,13 +713,7 @@ func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 
 			// 需要返回客户端断点上传的命令,指定文件偏移
 			if (cur == 0 && nSize > 0) || cur > nSize {
-				uri := (&url.URL{Scheme: fs.scheme, Host: r.Host, Path: r.RequestURI}).String()
-				if nSize == 0 {
-					_, err = fmt.Fprintf(w, "curl -T file %s\n", uri)
-				} else {
-					_, err = fmt.Fprintf(w, "curl -C %d -T file %s\n", nSize, uri)
-				}
-				return err
+				return fs.offset(w, r, nSize)
 			}
 
 			if cur > 0 { // 从指定位置继续写文件
@@ -757,4 +747,17 @@ func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 	}
 	_, err = w.Write(respOk)
 	return err
+}
+
+func (fs *fileServer) offset(w io.Writer, r *http.Request, size int64) (err error) {
+	var ( // 返回客户端断点上传的命令行参数
+		uri  = &url.URL{Scheme: fs.scheme, Host: r.Host, Path: r.RequestURI}
+		name = filepath.Base(uri.Path)
+	)
+	if size == 0 {
+		_, err = fmt.Fprintf(w, "curl -T %s %s\n", name, uri)
+	} else {
+		_, err = fmt.Fprintf(w, "curl -C %d -T %s %s\n", size, name, uri)
+	}
+	return
 }
