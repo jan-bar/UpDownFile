@@ -117,7 +117,7 @@ type fileClient struct {
 }
 
 func (fc *fileClient) getServerFileSize(url string) (int64, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := fc.newRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -132,19 +132,28 @@ func (fc *fileClient) getServerFileSize(url string) (int64, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return parseInt64(resp.Header.Get(offsetLength))
+		if off := resp.Header.Get(offsetLength); off != "" {
+			return parseInt64(off)
+		}
+		return 0, nil // 没有长度,回退到全量上传
 	case http.StatusNotFound:
 		return 0, nil // 服务器没有文件
 	default:
-		info, _ := io.ReadAll(resp.Body)
+		info, _ := io.ReadAll(resp.Body) // 其他错误
 		return 0, errors.Errorf("code:%d,resp:%s", resp.StatusCode, info)
 	}
 }
 
-func (fc *fileClient) setBasicAuth(req *http.Request) {
+func (fc *fileClient) newRequest(method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
 	if fc.user != "" && fc.pass != "" {
 		req.SetBasicAuth(fc.user, fc.pass)
 	}
+	return req, nil
 }
 
 func (fc *fileClient) post() error {
@@ -212,13 +221,12 @@ func (fc *fileClient) post() error {
 		size, body = sr.Size(), sr // 推送字符串到服务器
 	}
 
-	req, err := http.NewRequest(http.MethodPost, fc.httpUrl, body)
+	req, err := fc.newRequest(http.MethodPost, fc.httpUrl, body)
 	if err != nil {
 		return err
 	}
 	req.Header = hd
 	req.ContentLength = size // req.Header.Set(headerLength, "size")
-	fc.setBasicAuth(req)
 
 	resp, err := fc.client.Do(req)
 	if err != nil {
@@ -236,7 +244,7 @@ func (fc *fileClient) post() error {
 }
 
 func (fc *fileClient) get() error {
-	req, err := http.NewRequest(http.MethodGet, fc.httpUrl, nil)
+	req, err := fc.newRequest(http.MethodGet, fc.httpUrl, nil)
 	if err != nil {
 		return err
 	}
@@ -272,7 +280,6 @@ func (fc *fileClient) get() error {
 	if fc.gzipOn {
 		req.Header.Set(headerType, typeGzip)
 	}
-	fc.setBasicAuth(req)
 
 	resp, err := fc.client.Do(req)
 	if err != nil {

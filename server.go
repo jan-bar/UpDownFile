@@ -380,14 +380,15 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 	//goland:noinspection GoUnhandledErrorResult
 	defer fr.Close()
 
-	w.Header().Set(offsetLength, string(strconv.AppendInt(buf[:0], fi.Size(), 10)))
+	size := fi.Size()
+	w.Header().Set(offsetLength, string(strconv.AppendInt(buf[:10], size, 10)))
 
 	ht := r.Header.Get(headerType)
 	if ht == typeOffset {
 		if fi.IsDir() {
 			return &webErr{msg: "unable to get directory size"}
 		}
-		return fs.offset(w, r, fi.Size())
+		return fs.offset(w, r, size)
 	}
 
 	switch {
@@ -441,7 +442,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 		}
 	case ht == typeGzip:
 		gw, _ := gzip.NewWriterLevel(w, gzip.BestCompression)
-		pw := &progressBar{w: gw, b: newMpbBar(fs.pBar, http.MethodGet, fr.Name(), fi.Size())}
+		pw := &progressBar{w: gw, b: newMpbBar(fs.pBar, http.MethodGet, fr.Name(), size)}
 		_, err = io.CopyBuffer(pw, fr, buf)
 		pw.Close()
 		_ = gw.Close()
