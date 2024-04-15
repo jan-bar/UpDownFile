@@ -127,12 +127,18 @@ func (fc *fileClient) getServerFileSize(url string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	_ = resp.Body.Close()
+	//goland:noinspection GoUnhandledErrorResult
+	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return parseInt64(resp.Header.Get(offsetLength))
+	case http.StatusNotFound:
 		return 0, nil // 服务器没有文件
+	default:
+		info, _ := io.ReadAll(resp.Body)
+		return 0, errors.Errorf("code:%d,resp:%s", resp.StatusCode, info)
 	}
-	return parseInt64(resp.Header.Get(offsetLength))
 }
 
 func (fc *fileClient) setBasicAuth(req *http.Request) {

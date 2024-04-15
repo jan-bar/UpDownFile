@@ -257,6 +257,7 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// 先设置header,再写code,然后写消息体
 		w.Header().Set(headerType, "text/plain;charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, "msg: %s\n\n%+v", e.msg, e.err)
 	}
 }
