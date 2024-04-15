@@ -19,6 +19,8 @@
 执行：`upDownFile -h`，可查看服务端帮助信息：
 ```shell
 Usage of UpDownFile:
+  -auth string
+        username:password
   -ca string
         ca file (default "ca.crt")
   -cert string
@@ -40,6 +42,8 @@ Usage of UpDownFile:
 执行：`upDownFile cli -h`，可查看客户端帮助信息：
 ```shell
 Usage of UpDownFile cli:
+  -auth string
+        username:password
   -c    resumed transfer offset
   -ca string
         ca.crt to verify peer against
@@ -55,7 +59,7 @@ Usage of UpDownFile cli:
 
 执行：`UpDownFile`会打印辅助信息，里面有使用curl和wget的上传下载文件命令。  
 ```bash
-UpDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com
+UpDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com -auth "user:pass"
 
 web service: https://127.0.0.1:443
 
@@ -64,25 +68,25 @@ server:
 registry:
     upDownFile.exe -s [::]:443 -reg
 cli get:
-    upDownFile.exe cli -c -ca ca.crt -o C:\example.txt "https://janbar.com/example.txt"
+    upDownFile.exe cli -c -auth "user:pass" -ca ca.crt -o C:\example.txt "https://janbar.com/example.txt"
 cli post:
-    upDownFile.exe cli -c -ca ca.crt -d @C:\example.txt "https://janbar.com/example.txt"
+    upDownFile.exe cli -c -auth "user:pass" -ca ca.crt -d @C:\example.txt "https://janbar.com/example.txt"
 
 Get File:
-    wget --ca-certificate ca.crt -c --content-disposition "https://janbar.com/example.txt"
-    curl --cacert ca.crt -C - -OJ "https://janbar.com/example.txt"
+    wget --user "user" --password "pass" --ca-certificate ca.crt -c --content-disposition "https://janbar.com/example.txt"
+    curl -u "user:pass" --cacert ca.crt -C - -OJ "https://janbar.com/example.txt"
 
 Post File:
-    wget --ca-certificate ca.crt -qO - --post-file=C:\example.txt "https://janbar.com/example.txt"
-    curl --cacert ca.crt --data-binary @C:\example.txt "https://janbar.com/example.txt"
-    curl --cacert ca.crt -F "file=@C:\example.txt" "https://janbar.com/example.txt/"
+    wget --user "user" --password "pass" --ca-certificate ca.crt -qO - --post-file=C:\example.txt "https://janbar.com/example.txt"
+    curl -u "user:pass" --cacert ca.crt --data-binary @C:\example.txt "https://janbar.com/example.txt"
+    curl -u "user:pass" --cacert ca.crt -F "file=@C:\example.txt" "https://janbar.com/example.txt/"
 
 Get Offset:
-    curl --cacert ca.crt -H "Content-Type:application/offset" "https://janbar.com/example.txt"
-    wget --ca-certificate ca.crt -qO - --header "Content-Type:application/offset" "https://janbar.com/example.txt"
+    curl -u "user:pass" --cacert ca.crt -H "Content-Type:application/offset" "https://janbar.com/example.txt"
+    wget --user "user" --password "pass" --ca-certificate ca.crt -qO - --header "Content-Type:application/offset" "https://janbar.com/example.txt"
 
 Put File:
-    curl --cacert ca.crt -C - -T C:\example.txt "https://janbar.com/example.txt"
+    curl -u "user:pass" --cacert ca.crt -C - -T C:\example.txt "https://janbar.com/example.txt"
 ```
 
 不用改host的测试命令: `curl --resolve "janbar.com:443:127.0.0.1" --resolve "janbar.com:80:127.0.0.1" https://janbar.com`

@@ -22,7 +22,7 @@ import (
 )
 
 func serverMain(exe string, args []string) error {
-	var addrStr, domain, basePath, certFile, keyFile, caFile string
+	var addrStr, domain, basePath, certFile, keyFile, caFile, auth string
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
 	fs.StringVar(&basePath, "p", ".", "path")
 	fs.StringVar(&addrStr, "s", "", "ip:port")
@@ -30,6 +30,7 @@ func serverMain(exe string, args []string) error {
 	fs.StringVar(&certFile, "cert", "", "cert file")
 	fs.StringVar(&keyFile, "key", "", "key file")
 	fs.StringVar(&caFile, "ca", "ca.crt", "ca file")
+	fs.StringVar(&auth, "auth", "", "username:password")
 	timeout := fs.Duration("t", time.Minute, "read header timeout")
 	reg := fs.Bool("reg", false, "add right click registry")
 	err := fs.Parse(args)
@@ -103,33 +104,38 @@ web service: {{$v}}
 {{- end}}
 
 server:
-    {{.exec}} -s {{.listen}} -p {{.dir}} -t {{.timeout}}{{if .cert}} -ca {{.ca}} -cert {{.cert}}{{end}}{{if .key}} -key {{.key}}{{end}}{{if .domain}} -d {{.domain}}{{end}}
+    {{.exec}} -s {{.listen}} -p {{.dir}} -t {{.timeout}}{{if .auth}} -auth "{{.auth}}"{{end}}{{if .cert}} -ca {{.ca}} -cert {{.cert}}{{end}}{{if .key}} -key {{.key}}{{end}}{{if .domain}} -d {{.domain}}{{end}}
 registry:
     {{.exec}} -s {{.listen}} -reg
 cli get:
-    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} -o C:\{{.example}} "{{.addr}}/{{.example}}"
+    {{.exec}} cli -c{{if .auth}} -auth "{{.auth}}"{{end}}{{if or .cert .key}} -ca {{.ca}}{{end}} -o C:\{{.example}} "{{.addr}}/{{.example}}"
 cli post:
-    {{.exec}} cli -c{{if or .cert .key}} -ca {{.ca}}{{end}} -d @C:\{{.example}} "{{.addr}}/{{.example}}"
+    {{.exec}} cli -c{{if .auth}} -auth "{{.auth}}"{{end}}{{if or .cert .key}} -ca {{.ca}}{{end}} -d @C:\{{.example}} "{{.addr}}/{{.example}}"
 
 Get File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-c --content-disposition "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -OJ "{{.addr}}/{{.example}}"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-c --content-disposition "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-C - -OJ "{{.addr}}/{{.example}}"
 
 Post File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --post-file=C:\{{.example}} "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}--data-binary @C:\{{.example}} "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-F "file=@C:\{{.example}}" "{{.addr}}/{{.example}}/"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-qO - --post-file=C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}--data-binary @C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-F "file=@C:\{{.example}}" "{{.addr}}/{{.example}}/"
 
 Get Offset:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-H "Content-Type:application/offset" "{{.addr}}/{{.example}}"
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}-qO - --header "Content-Type:application/offset" "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-H "Content-Type:application/offset" "{{.addr}}/{{.example}}"
+    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-qO - --header "Content-Type:application/offset" "{{.addr}}/{{.example}}"
 
 Put File:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}-C - -T C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-C - -T C:\{{.example}} "{{.addr}}/{{.example}}"
 
 `)
 	if err != nil {
 		return err
+	}
+
+	var wget string
+	if user, pass, ok := strings.Cut(auth, ":"); ok {
+		wget = fmt.Sprintf(`--user "%s" --password "%s"`, user, pass)
 	}
 
 	err = tpl.Execute(os.Stdout, map[string]any{
@@ -144,6 +150,8 @@ Put File:
 		"cert":    certFile,
 		"key":     keyFile,
 		"ca":      caFile,
+		"auth":    auth,
+		"wget":    wget,
 	})
 	if err != nil {
 		return err
@@ -155,6 +163,7 @@ Put File:
 			path:   basePath,
 			pBar:   newMpbProgress(),
 			scheme: uri.Scheme,
+			auth:   auth,
 		},
 		ReadTimeout:       *timeout,
 		ReadHeaderTimeout: *timeout,
@@ -170,6 +179,7 @@ type fileServer struct {
 	path   string
 	pBar   *mpb.Progress
 	scheme string
+	auth   string
 }
 
 const (
@@ -202,6 +212,14 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		pool := bytePool.Get().(*poolByte)
 		defer bytePool.Put(pool)
+
+		if fs.auth != "" {
+			if user, pass, ok := r.BasicAuth(); !ok || user+":"+pass != fs.auth {
+				w.Header().Add("WWW-Authenticate", `Basic realm="Please Authenticate"`)
+				http.Error(w, "Authenticate Error", http.StatusUnauthorized)
+				return
+			}
+		}
 
 		switch r.Method {
 		case http.MethodGet:

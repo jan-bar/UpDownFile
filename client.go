@@ -30,9 +30,18 @@ func clientMain(exe string, args []string) error {
 	insecure := fs.Bool("k", false, "allow insecure server connections")
 	timeout := fs.Duration("t", time.Minute, "client timeout")
 	fs.BoolVar(&client.gzipOn, "g", false, "gzip file to send")
+	auth := fs.String("auth", "", "username:password")
 	err := fs.Parse(args)
 	if err != nil {
 		return err
+	}
+
+	if *auth != "" {
+		var ok bool
+		client.user, client.pass, ok = strings.Cut(*auth, ":")
+		if !ok {
+			return errors.New("invalid auth header")
+		}
 	}
 
 	if client.httpUrl = fs.Arg(0); client.httpUrl == "" {
@@ -103,6 +112,8 @@ type fileClient struct {
 	buf     []byte
 	point   bool
 	gzipOn  bool
+
+	user, pass string
 }
 
 func (fc *fileClient) getServerFileSize(url string) (int64, error) {
@@ -122,6 +133,12 @@ func (fc *fileClient) getServerFileSize(url string) (int64, error) {
 		return 0, nil // 服务器没有文件
 	}
 	return parseInt64(resp.Header.Get(offsetLength))
+}
+
+func (fc *fileClient) setBasicAuth(req *http.Request) {
+	if fc.user != "" && fc.pass != "" {
+		req.SetBasicAuth(fc.user, fc.pass)
+	}
 }
 
 func (fc *fileClient) post() error {
@@ -195,6 +212,7 @@ func (fc *fileClient) post() error {
 	}
 	req.Header = hd
 	req.ContentLength = size // req.Header.Set(headerLength, "size")
+	fc.setBasicAuth(req)
 
 	resp, err := fc.client.Do(req)
 	if err != nil {
@@ -248,6 +266,8 @@ func (fc *fileClient) get() error {
 	if fc.gzipOn {
 		req.Header.Set(headerType, typeGzip)
 	}
+	fc.setBasicAuth(req)
+
 	resp, err := fc.client.Do(req)
 	if err != nil {
 		return err
