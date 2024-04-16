@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/vbauerster/mpb/v8"
 )
 
@@ -109,11 +109,11 @@ type fileClient struct {
 	httpUrl string
 	data    string
 	output  string
+	user    string
+	pass    string
 	buf     []byte
 	point   bool
 	gzipOn  bool
-
-	user, pass string
 }
 
 func (fc *fileClient) getServerFileSize(url string) (int64, error) {
@@ -140,7 +140,7 @@ func (fc *fileClient) getServerFileSize(url string) (int64, error) {
 		return 0, nil // 服务器没有文件
 	default:
 		info, _ := io.ReadAll(resp.Body) // 其他错误
-		return 0, errors.Errorf("code:%d,resp:%s", resp.StatusCode, info)
+		return 0, fmt.Errorf("code:%d,resp:%s", resp.StatusCode, info)
 	}
 }
 
@@ -210,7 +210,7 @@ func (fc *fileClient) post() error {
 					if bs, ok := pr.r.(io.Seeker); ok {
 						_, err = bs.Seek(cur, io.SeekStart)
 						if err != nil {
-							return errors.WithStack(err)
+							return err
 						}
 						pr.b.SetCurrent(cur)
 						size -= cur // 设置当前长度,并设置实际发送数据长度
@@ -263,7 +263,7 @@ func (fc *fileClient) get() error {
 		fileFlag := flagW
 		if fi, err := os.Stat(fc.output); err == nil {
 			if fi.IsDir() {
-				return errors.Errorf("%s is dir", fc.output)
+				return fmt.Errorf("%s is dir", fc.output)
 			}
 
 			if !fc.gzipOn && fc.point {
@@ -341,7 +341,7 @@ func scanRangeSize(h http.Header) (first, last, length int64, err error) {
 	var n int // Content-Range: bytes (unit first byte pos) - [last byte pos]/[entity length]
 	n, err = fmt.Sscanf(h.Get("Content-Range"), "bytes %d-%d/%d", &first, &last, &length)
 	if n != 3 {
-		err = errors.Errorf("scanRangeSize n=%d", n)
+		err = fmt.Errorf("scanRangeSize n=%d", n)
 	}
 	return
 }

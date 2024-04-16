@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,7 +17,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 )
@@ -33,6 +33,7 @@ func serverMain(exe string, args []string) error {
 	fs.StringVar(&auth, "auth", "", "username:password")
 	timeout := fs.Duration("t", time.Minute, "read header timeout")
 	reg := fs.Bool("reg", false, "add right click registry")
+	deny := fs.Bool("deny", false, denyDirMsg)
 	err := fs.Parse(args)
 	if err != nil {
 		return err
@@ -56,7 +57,7 @@ func serverMain(exe string, args []string) error {
 
 	if *reg {
 		if tcpAddr.Port < 80 {
-			return errors.Errorf("usage: %s -s ip:port -reg\n", exe)
+			return fmt.Errorf("usage: %s -s ip:port -reg\n", exe)
 		}
 		return createRegFile(exe, tcpAddr.String())
 	}
@@ -164,6 +165,7 @@ Put File:
 			pBar:   newMpbProgress(),
 			scheme: uri.Scheme,
 			auth:   auth,
+			deny:   *deny,
 		},
 		ReadTimeout:       *timeout,
 		ReadHeaderTimeout: *timeout,
@@ -180,6 +182,7 @@ type fileServer struct {
 	pBar   *mpb.Progress
 	scheme string
 	auth   string
+	deny   bool
 }
 
 const (
@@ -210,78 +213,85 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.RequestURI == "/favicon.ico" {
 		_, err = w.Write(icoData) // 返回网页的图标
 	} else {
-		pool := bytePool.Get().(*poolByte)
-		defer bytePool.Put(pool)
-
 		if fs.auth != "" {
 			if user, pass, ok := r.BasicAuth(); !ok || user+":"+pass != fs.auth {
 				w.Header().Add("WWW-Authenticate", `Basic realm="Please Authenticate"`)
-				http.Error(w, "Authenticate Error", http.StatusUnauthorized)
-				return
+				err = &webErr{code: http.StatusUnauthorized, msg: "Authenticate Error"}
 			}
 		}
 
-		switch r.Method {
-		case http.MethodGet:
-			err = fs.get(w, r, pool.buf)
-		case http.MethodPost:
-			err = fs.post(w, r, pool.buf)
-		case http.MethodHead:
-			err = fs.head(w, r)
-		case http.MethodPut:
-			err = fs.put(w, r, pool.buf)
-		default:
-			err = &webErr{msg: r.Method + " not support"}
+		if err == nil {
+			pool := bytePool.Get().(*poolByte)
+			defer bytePool.Put(pool)
+
+			switch r.Method {
+			case http.MethodGet:
+				err = fs.get(w, r, pool.buf)
+			case http.MethodPost:
+				err = fs.post(w, r, pool.buf)
+			case http.MethodHead:
+				err = fs.head(w, r)
+			case http.MethodPut:
+				err = fs.put(w, r, pool.buf)
+			default:
+				err = &webErr{
+					code: http.StatusMethodNotAllowed,
+					msg:  r.Method + " not support",
+				}
+			}
 		}
 	}
 
 	if err != nil {
 		var e *webErr
 		if !errors.As(err, &e) {
-			e = &webErr{err: err}
+			e = &webErr{msg: "Internal Server Error", err: err}
 		}
 
-		if errors.Is(e.err, os.ErrNotExist) {
-			w.Header().Set(headerType, "text/html;charset=utf-8")
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, `<html>
-<head><title>404 Not Found</title></head>
-<body>
-<center><h1>404 Not Found</h1></center>
-<hr>
-<center>%v</center>
-</body>
-</html>`, e.err)
-			return
+		if e.code == 0 {
+			e.code = http.StatusInternalServerError
 		}
 
-		// 先设置header,再写code,然后写消息体
-		w.Header().Set(headerType, "text/plain;charset=utf-8")
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = fmt.Fprintf(w, "msg: %s\n\n%+v", e.msg, e.err)
+		w.Header().Set(headerType, "text/html;charset=utf-8")
+		w.WriteHeader(e.code)
+		_, _ = fmt.Fprintf(w, `<html><head><title>UpDownFile</title></head><body><center><h1>%s</h1></center><hr><center>%v</center></body></html>`, e.msg, e.err)
 	}
 }
 
 type webErr struct {
-	err error
-	msg string
+	err  error
+	msg  string
+	code int
 }
 
 func (w *webErr) Error() string {
 	return w.msg
 }
 
+const denyDirMsg = "deny directory request"
+
 func (fs *fileServer) open(r *http.Request) (fr *os.File, fi os.FileInfo, err error) {
 	fr, err = os.Open(filepath.Join(fs.path, r.URL.Path))
 	if err != nil {
-		err = &webErr{err: errors.WithStack(err)}
+		if os.IsNotExist(err) {
+			err = &webErr{
+				code: http.StatusNotFound,
+				msg:  "404 Not Found",
+				err:  err,
+			}
+		}
 		return
 	}
 
 	fi, err = fr.Stat()
 	if err != nil {
 		_ = fr.Close()
-		err = &webErr{err: errors.WithStack(err)}
+	} else if fs.deny && fi.IsDir() {
+		err = &webErr{
+			code: http.StatusForbidden,
+			msg:  denyDirMsg,
+			err:  err,
+		}
 	}
 	return
 }
@@ -386,7 +396,10 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 	ht := r.Header.Get(headerType)
 	if ht == typeOffset {
 		if fi.IsDir() {
-			return &webErr{msg: "unable to get directory size"}
+			return &webErr{
+				code: http.StatusForbidden,
+				msg:  "unable to get directory size",
+			}
 		}
 		return fs.offset(w, r, size)
 	}
@@ -395,10 +408,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 	case fi.IsDir():
 		dir, sortNum, err := fs.sortDir(fr, r.FormValue("sort"))
 		if err != nil {
-			return &webErr{
-				msg: "sort dir",
-				err: errors.WithStack(err),
-			}
+			return err
 		}
 
 		type lineFileInfo struct {
@@ -435,10 +445,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 			"info": info,
 		})
 		if err != nil {
-			return &webErr{
-				msg: "tpl.Execute",
-				err: errors.WithStack(err),
-			}
+			return err
 		}
 	case ht == typeGzip:
 		gw, _ := gzip.NewWriterLevel(w, gzip.BestCompression)
@@ -447,10 +454,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 		pw.Close()
 		_ = gw.Close()
 		if err != nil {
-			return &webErr{
-				msg: "io.CopyBuffer",
-				err: errors.WithStack(err),
-			}
+			return err
 		}
 	default:
 		pb := newMpbBar(fs.pBar, http.MethodGet, fr.Name(), 0)
@@ -620,7 +624,10 @@ func (fs *fileServer) sortDir(dir *os.File, s string) (list []os.FileInfo, st in
 
 func (fs *fileServer) post(w io.Writer, r *http.Request, buf []byte) error {
 	if r.Body == nil {
-		return &webErr{msg: "body is null"}
+		return &webErr{
+			code: http.StatusBadRequest,
+			msg:  "body is null",
+		}
 	}
 
 	var (
@@ -653,7 +660,8 @@ func (fs *fileServer) post(w io.Writer, r *http.Request, buf []byte) error {
 	default:
 		if !strings.HasPrefix(ht, "multipart/form-data;") {
 			return &webErr{
-				msg: fmt.Sprintf("%s:%s not support", headerType, ht),
+				code: http.StatusForbidden,
+				msg:  fmt.Sprintf("%s:%s not support", headerType, ht),
 			}
 		}
 
@@ -687,7 +695,10 @@ func (fs *fileServer) post(w io.Writer, r *http.Request, buf []byte) error {
 
 func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 	if r.Body == nil {
-		return &webErr{msg: "body is null"}
+		return &webErr{
+			code: http.StatusBadRequest,
+			msg:  "body is null",
+		}
 	}
 
 	var (
@@ -710,7 +721,10 @@ func (fs *fileServer) put(w io.Writer, r *http.Request, buf []byte) error {
 
 			nSize := fi.Size()
 			if nSize >= size {
-				return &webErr{msg: "file upload is complete"}
+				return &webErr{
+					code: http.StatusConflict,
+					msg:  "file upload is complete",
+				}
 			}
 
 			// 需要返回客户端断点上传的命令,指定文件偏移
