@@ -290,7 +290,6 @@ func (fs *fileServer) open(r *http.Request) (fr *os.File, fi os.FileInfo, err er
 		err = &webErr{
 			code: http.StatusForbidden,
 			msg:  denyDirMsg,
-			err:  err,
 		}
 	}
 	return

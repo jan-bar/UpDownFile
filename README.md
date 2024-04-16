@@ -27,6 +27,8 @@ Usage of UpDownFile:
         cert file
   -d string
         domain name
+  -deny
+        deny directory request
   -key string
         key file
   -p string
@@ -59,18 +61,18 @@ Usage of UpDownFile cli:
 
 执行：`UpDownFile`会打印辅助信息，里面有使用curl和wget的上传下载文件命令。  
 ```bash
-UpDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com -auth "user:pass"
+upDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com -auth "user:pass"
 
 web service: https://127.0.0.1:443
 
 server:
-    upDownFile.exe -s [::]:443 -p C:\dir -t 1m0s -ca ca.crt -cert janbar.cert -key janbar.key -d janbar.com
+    upDownFile -s [::]:443 -p C:\dir -t 1m0s -ca ca.crt -cert janbar.cert -key janbar.key -d janbar.com
 registry:
-    upDownFile.exe -s [::]:443 -reg
+    upDownFile -s [::]:443 -reg
 cli get:
-    upDownFile.exe cli -c -auth "user:pass" -ca ca.crt -o C:\example.txt "https://janbar.com/example.txt"
+    upDownFile cli -c -auth "user:pass" -ca ca.crt -o C:\example.txt "https://janbar.com/example.txt"
 cli post:
-    upDownFile.exe cli -c -auth "user:pass" -ca ca.crt -d @C:\example.txt "https://janbar.com/example.txt"
+    upDownFile cli -c -auth "user:pass" -ca ca.crt -d @C:\example.txt "https://janbar.com/example.txt"
 
 Get File:
     wget --user "user" --password "pass" --ca-certificate ca.crt -c --content-disposition "https://janbar.com/example.txt"
@@ -119,11 +121,18 @@ UpDownFile cli -c -d @tmp.txt http://127.0.0.1:8080/tmp.txt
 断点下载`curl`,`wget`,以及我的cli工具均支持,没啥好说的,都在示例里面。
 
 ## 生成https证书
-在Linux后台执行`./gen_cert.sh`,可以得到三个文件`ca.crt, janbar.key, janbar.cert`  
-服务器需要两个文件启动服务: `janbar.key, janbar.cert`  
-客户端需要`ca.crt`信任证书  
+```shell
+# 安装工具
+go install github.com/jan-bar/mkcert@latest
+# 安装CA证书
+mkcert -install
+# 生成指定域名和ip的证书,得到2个文件: janbar.com+4.pem,janbar.com+4-key.pem
+mkcert janbar.com "*.janbar.com" localhost 127.0.0.1 ::1
+# 查看CA证书路径,根据不同系统添加CA根证书信任
+mkcert -CAROOT
+```
 
-windows电脑按图所示添加ca根证书  
+windows电脑按图所示添加`CA`根证书  
 在host中添加`127.0.0.1 janbar.com`之后浏览器访问`https://janbar.com`服务器就不会提示不安全  
 ![load_ca](load_ca.png)
 

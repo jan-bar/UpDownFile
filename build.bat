@@ -11,5 +11,3 @@ set GOOS=darwin
 go build -ldflags %ldflags% -trimpath -o upDownFile.mac
 set GOOS=windows
 go build -ldflags %ldflags% -trimpath -o upDownFile.exe
-
-where /q upx && upx -9 upDownFile.arm64 upDownFile.amd64 upDownFile.exe
