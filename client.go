@@ -305,7 +305,7 @@ func (fc *fileClient) get() error {
 	case http.StatusOK:
 		size, err = parseInt64(resp.Header.Get(headerLength))
 		if err != nil { // 正常返回长度解析失败,用自定义长度
-			size, err = parseInt64(resp.Header.Get(offsetLength))
+			size, _ = parseInt64(resp.Header.Get(offsetLength))
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		size, _ = io.CopyBuffer(io.Discard, resp.Body, fc.buf)
@@ -314,6 +314,10 @@ func (fc *fileClient) get() error {
 	default:
 		_, _ = io.CopyBuffer(os.Stdout, resp.Body, fc.buf)
 		return nil
+	}
+
+	if size == 0 {
+		return errors.New("size == 0")
 	}
 
 	rb := resp.Body

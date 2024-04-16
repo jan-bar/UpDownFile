@@ -657,6 +657,9 @@ func (fs *fileServer) post(w io.Writer, r *http.Request, buf []byte) error {
 		}
 		// 服务器解析gzip数据,直接使用自定义长度
 		size, err = parseInt64(r.Header.Get(offsetLength))
+		if err != nil {
+			return err
+		}
 	default:
 		if !strings.HasPrefix(ht, "multipart/form-data;") {
 			return &webErr{
