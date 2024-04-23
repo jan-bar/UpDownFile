@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"flag"
@@ -34,6 +35,7 @@ func serverMain(exe string, args []string) error {
 	timeout := fs.Duration("t", time.Minute, "read header timeout")
 	reg := fs.Bool("reg", false, "add right click registry")
 	deny := fs.Bool("deny", false, denyDirMsg)
+	log := fs.String("log", "", "log template,<raw string> or @log.txt")
 	err := fs.Parse(args)
 	if err != nil {
 		return err
@@ -158,15 +160,49 @@ Put File:
 		return err
 	}
 
+	srh := &fileServer{
+		path:   basePath,
+		pBar:   newMpbProgress(),
+		scheme: uri.Scheme,
+		auth:   auth,
+		deny:   *deny,
+	}
+
+	if *log != "" {
+		if p, ok := strings.CutPrefix(*log, "@"); ok {
+			pb, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			*log = string(pb)
+		}
+
+		// 读取命令行参数或文件,作为输出日志模板
+		srh.log, err = template.New("").Funcs(template.FuncMap{
+			"time": func(layout string) any {
+				switch now := time.Now(); layout {
+				case "Unix":
+					return now.Unix()
+				case "UnixMilli":
+					return now.UnixMilli()
+				case "UnixMicro":
+					return now.UnixMicro()
+				case "UnixNano":
+					return now.UnixNano()
+				default:
+					return time.Now().Format(layout)
+				}
+			},
+		}).Parse(*log)
+		if err != nil {
+			return err
+		}
+	}
+
 	srv := &http.Server{
-		Addr: addrStr,
-		Handler: &fileServer{
-			path:   basePath,
-			pBar:   newMpbProgress(),
-			scheme: uri.Scheme,
-			auth:   auth,
-			deny:   *deny,
-		},
+		Addr:    addrStr,
+		Handler: srh,
+
 		ReadTimeout:       *timeout,
 		ReadHeaderTimeout: *timeout,
 	}
@@ -183,6 +219,7 @@ type fileServer struct {
 	scheme string
 	auth   string
 	deny   bool
+	log    *template.Template
 }
 
 const (
@@ -223,6 +260,19 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			pool := bytePool.Get().(*poolByte)
 			defer bytePool.Put(pool)
+
+			if fs.log != nil {
+				out := bytes.NewBuffer(pool.buf[:0])
+
+				err = fs.log.Execute(out, map[string]any{
+					"req": r,
+				})
+				if err != nil {
+					fmt.Printf("log error:%v\n", err)
+				} else {
+					fmt.Printf("%s\n", out.Bytes())
+				}
+			}
 
 			switch r.Method {
 			case http.MethodGet:
