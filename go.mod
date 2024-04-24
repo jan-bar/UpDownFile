@@ -2,7 +2,11 @@ module github.com/jan-bar/UpDownFile
 
 go 1.22
 
-require github.com/vbauerster/mpb/v8 v8.7.3
+require (
+	github.com/vbauerster/mpb/v8 v8.7.3
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/VividCortex/ewma v1.2.0 // indirect

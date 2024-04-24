@@ -20,40 +20,65 @@ import (
 
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
+	"gopkg.in/natefinch/lumberjack.v2"
+	"gopkg.in/yaml.v3"
 )
 
 func serverMain(exe string, args []string) error {
-	var addrStr, domain, basePath, certFile, keyFile, caFile, auth string
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
-	fs.StringVar(&basePath, "p", ".", "path")
-	fs.StringVar(&addrStr, "s", "", "ip:port")
-	fs.StringVar(&domain, "d", "", "domain name")
-	fs.StringVar(&certFile, "cert", "", "cert file")
-	fs.StringVar(&keyFile, "key", "", "key file")
-	fs.StringVar(&caFile, "ca", "ca.crt", "ca file")
-	fs.StringVar(&auth, "auth", "", "username:password")
-	timeout := fs.Duration("t", time.Minute, "read header timeout")
+	cnf := fs.String("c", "", "config file")
+	path := fs.String("p", ".", "path")
+	listen := fs.String("s", "", "ip:port")
 	reg := fs.Bool("reg", false, "add right click registry")
-	deny := fs.Bool("deny", false, denyDirMsg)
-	logOut := fs.String("log", "", "log output file")
-	logTpl := fs.String("logTpl", "", "log template,<raw string> or @log.txt")
 	err := fs.Parse(args)
 	if err != nil {
 		return err
 	}
 
-	uri := &url.URL{Scheme: schemeHttp}
-	if certFile != "" || keyFile != "" {
-		if certFile == "" {
-			return errors.New("cert file is null")
-		}
-		if keyFile == "" {
-			return errors.New("key file is null")
-		}
-		uri.Scheme = schemeHttps
+	var config struct {
+		Listen      string `yaml:"listen"`
+		Path        string `yaml:"path"`
+		Auth        string `yaml:"auth"`
+		Timeout     string `yaml:"timeout"`
+		Deny        bool   `yaml:"deny"`
+		Certificate struct {
+			Domain string `yaml:"domain"`
+			Cert   string `yaml:"cert"`
+			Key    string `yaml:"key"`
+			Ca     string `yaml:"ca"`
+		} `yaml:"certificate"`
+		Log struct {
+			lumberjack.Logger `yaml:"logger"`
+			Template          string `yaml:"template"`
+		} `yaml:"log"`
 	}
 
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addrStr)
+	if *cnf != "" {
+		d, err := os.ReadFile(*cnf)
+		if err != nil {
+			return err
+		}
+
+		err = yaml.Unmarshal(d, &config)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 常用参数覆盖配置文件
+	if *path != "" {
+		config.Path = *path
+	}
+	if *listen != "" {
+		config.Listen = *listen
+	}
+
+	timeout := time.Minute
+	if t, err := time.ParseDuration(config.Timeout); err == nil {
+		timeout = t // 配置文件读取超时时间成功
+	}
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", config.Listen)
 	if err != nil {
 		return err
 	}
@@ -63,6 +88,17 @@ func serverMain(exe string, args []string) error {
 			return fmt.Errorf("usage: %s -s ip:port -reg\n", exe)
 		}
 		return createRegFile(exe, tcpAddr.String())
+	}
+
+	uri := &url.URL{Scheme: schemeHttp}
+	if config.Certificate.Cert != "" || config.Certificate.Key != "" {
+		if config.Certificate.Cert == "" {
+			return errors.New("cert file is null")
+		}
+		if config.Certificate.Key == "" {
+			return errors.New("key file is null")
+		}
+		uri.Scheme = schemeHttps
 	}
 
 	addr, err := net.ListenTCP("tcp", tcpAddr)
@@ -85,10 +121,10 @@ func serverMain(exe string, args []string) error {
 	uri.Host = tcpAddr.String()
 	urls = append(urls, uri.String())
 
-	if domain == "" {
+	if config.Certificate.Domain == "" {
 		uri.Host = tcpAddr.IP.String()
 	} else {
-		uri.Host = domain
+		uri.Host = config.Certificate.Domain
 	}
 
 	if !((uri.Scheme == schemeHttp && tcpAddr.Port == 80) ||
@@ -96,9 +132,9 @@ func serverMain(exe string, args []string) error {
 		// 不是特殊协议和端口,需要拼接端口,特殊协议不需要带上端口
 		uri.Host = net.JoinHostPort(uri.Host, strconv.Itoa(tcpAddr.Port))
 	}
-	addrStr = uri.String()
+	addrStr := uri.String()
 
-	basePath, err = filepath.Abs(basePath)
+	config.Path, err = filepath.Abs(config.Path)
 	if err != nil {
 		return err
 	}
@@ -138,7 +174,7 @@ Put File:
 	}
 
 	var wget string
-	if user, pass, ok := strings.Cut(auth, ":"); ok {
+	if user, pass, ok := strings.Cut(config.Auth, ":"); ok {
 		wget = fmt.Sprintf(`--user "%s" --password "%s"`, user, pass)
 	}
 
@@ -147,14 +183,14 @@ Put File:
 		"listen":  addr.Addr().String(),
 		"urls":    urls,
 		"addr":    addrStr,
-		"domain":  domain,
+		"domain":  config.Certificate.Domain,
 		"example": "example.txt",
-		"dir":     basePath,
+		"dir":     config.Path,
 		"timeout": timeout.String(),
-		"cert":    certFile,
-		"key":     keyFile,
-		"ca":      caFile,
-		"auth":    auth,
+		"cert":    config.Certificate.Cert,
+		"key":     config.Certificate.Key,
+		"ca":      config.Certificate.Ca,
+		"auth":    config.Auth,
 		"wget":    wget,
 	})
 	if err != nil {
@@ -162,33 +198,22 @@ Put File:
 	}
 
 	srh := &fileServer{
-		path:   basePath,
+		path:   config.Path,
 		pBar:   newMpbProgress(),
 		scheme: uri.Scheme,
-		auth:   auth,
-		deny:   *deny,
+		auth:   config.Auth,
+		deny:   config.Deny,
+		out:    os.Stdout,
 	}
 
-	out := os.Stdout
-	if *logOut != "" {
-		fw, err := os.OpenFile(*logOut, flagA, os.ModePerm)
-		if err == nil {
-			defer fw.Close()
-			out = fw // 打开文件成功时写入文件,否则输出到os.Stdout
-		}
+	if config.Log.Filename != "-" {
+		defer config.Log.Logger.Close()
+		srh.out = &config.Log.Logger
 	}
 
-	if *logTpl != "" {
-		if p, ok := strings.CutPrefix(*logTpl, "@"); ok {
-			pb, err := os.ReadFile(p)
-			if err != nil {
-				return err
-			}
-			*logTpl = string(pb)
-		}
-
+	if config.Log.Template != "" {
 		// 读取命令行参数或文件,作为输出日志模板
-		tpl, err = template.New("").Funcs(template.FuncMap{
+		srh.log, err = template.New("").Funcs(template.FuncMap{
 			"time": func(layout string) any {
 				switch now := time.Now(); layout {
 				case "Unix":
@@ -203,23 +228,9 @@ Put File:
 					return now.Format(layout)
 				}
 			},
-		}).Parse(*logTpl)
+		}).Parse(config.Log.Template)
 		if err != nil {
 			return err
-		}
-
-		srh.log = func(data any) {
-			pool := bytePool.Get().(*poolByte)
-			defer bytePool.Put(pool)
-
-			buf := bytes.NewBuffer(pool.buf[:0])
-
-			err = tpl.Execute(buf, data)
-			if err != nil {
-				fmt.Fprintf(out, "log error: %v", err)
-			} else {
-				fmt.Fprintf(out, "%s\n", buf.Bytes())
-			}
 		}
 	}
 
@@ -227,12 +238,12 @@ Put File:
 		Addr:    addrStr,
 		Handler: srh,
 
-		ReadTimeout:       *timeout,
-		ReadHeaderTimeout: *timeout,
+		ReadTimeout:       timeout,
+		ReadHeaderTimeout: timeout,
 	}
 
 	if uri.Scheme == schemeHttps {
-		return srv.ServeTLS(addr, certFile, keyFile)
+		return srv.ServeTLS(addr, config.Certificate.Cert, config.Certificate.Key)
 	}
 	return srv.Serve(addr)
 }
@@ -243,7 +254,8 @@ type fileServer struct {
 	scheme string
 	auth   string
 	deny   bool
-	log    func(any)
+	out    io.Writer
+	log    *template.Template
 }
 
 const (
@@ -286,9 +298,15 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer bytePool.Put(pool)
 
 			if fs.log != nil {
-				fs.log(map[string]any{
+				buf := bytes.NewBuffer(pool.buf[:0])
+				err = fs.log.Execute(buf, map[string]any{
 					"req": r,
 				})
+				if err != nil {
+					fmt.Fprintf(fs.out, "log error: %v\n", err)
+				} else {
+					fmt.Fprintf(fs.out, "%s", buf.Bytes())
+				}
 			}
 
 			switch r.Method {

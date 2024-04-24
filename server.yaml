@@ -1,0 +1,45 @@
+# ip:port
+listen: ":80"
+# service path
+path: .
+# username:password
+auth: ""
+# read header timeout
+timeout: 1m
+# deny directory request
+deny: false
+# https config
+certificate:
+  # domain name
+  domain: ""
+  # cert file path
+  cert: ""
+  # key file path
+  key: ""
+  # ca file path
+  ca: ""
+# log
+log:
+  logger:
+    # https://github.com/natefinch/lumberjack?tab=readme-ov-file#type-logger
+    filename: "log.txt"
+    maxsize: 100
+    maxage: 1
+    maxbackups: 10
+    localtime: true
+    compress: false
+  # custom log template
+  template: |
+    Time: {{time "2006-01-02 15:04:05"}}
+    TimeUnix: {{time "Unix"}}
+    {{- with .req}}
+    Method: {{.Method}}
+    RemoteAddr: {{.RemoteAddr}}
+    Referer: {{index .Header "Referer"}}
+    X-Real-Ip: {{index .Header "X-Real-Ip"}}
+    X-Forwarded-For: {{index .Header "X-Forwarded-For"}}
+    ContentLength: {{.ContentLength}}
+    Host: {{.Host}}
+    RequestURI: {{.RequestURI}}
+    URL: {{.URL}}
+    {{end}}
