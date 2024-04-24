@@ -35,7 +35,8 @@ func serverMain(exe string, args []string) error {
 	timeout := fs.Duration("t", time.Minute, "read header timeout")
 	reg := fs.Bool("reg", false, "add right click registry")
 	deny := fs.Bool("deny", false, denyDirMsg)
-	log := fs.String("log", "", "log template,<raw string> or @log.txt")
+	logOut := fs.String("log", "", "log output file")
+	logTpl := fs.String("logTpl", "", "log template,<raw string> or @log.txt")
 	err := fs.Parse(args)
 	if err != nil {
 		return err
@@ -168,17 +169,26 @@ Put File:
 		deny:   *deny,
 	}
 
-	if *log != "" {
-		if p, ok := strings.CutPrefix(*log, "@"); ok {
+	out := os.Stdout
+	if *logOut != "" {
+		fw, err := os.OpenFile(*logOut, flagA, os.ModePerm)
+		if err == nil {
+			defer fw.Close()
+			out = fw // 打开文件成功时写入文件,否则输出到os.Stdout
+		}
+	}
+
+	if *logTpl != "" {
+		if p, ok := strings.CutPrefix(*logTpl, "@"); ok {
 			pb, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
-			*log = string(pb)
+			*logTpl = string(pb)
 		}
 
 		// 读取命令行参数或文件,作为输出日志模板
-		srh.log, err = template.New("").Funcs(template.FuncMap{
+		tpl, err = template.New("").Funcs(template.FuncMap{
 			"time": func(layout string) any {
 				switch now := time.Now(); layout {
 				case "Unix":
@@ -193,9 +203,23 @@ Put File:
 					return now.Format(layout)
 				}
 			},
-		}).Parse(*log)
+		}).Parse(*logTpl)
 		if err != nil {
 			return err
+		}
+
+		srh.log = func(data any) {
+			pool := bytePool.Get().(*poolByte)
+			defer bytePool.Put(pool)
+
+			buf := bytes.NewBuffer(pool.buf[:0])
+
+			err = tpl.Execute(buf, data)
+			if err != nil {
+				fmt.Fprintf(out, "log error: %v", err)
+			} else {
+				fmt.Fprintf(out, "%s\n", buf.Bytes())
+			}
 		}
 	}
 
@@ -219,7 +243,7 @@ type fileServer struct {
 	scheme string
 	auth   string
 	deny   bool
-	log    *template.Template
+	log    func(any)
 }
 
 const (
@@ -262,16 +286,9 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer bytePool.Put(pool)
 
 			if fs.log != nil {
-				out := bytes.NewBuffer(pool.buf[:0])
-
-				err = fs.log.Execute(out, map[string]any{
+				fs.log(map[string]any{
 					"req": r,
 				})
-				if err != nil {
-					fmt.Printf("log error:%v\n", err)
-				} else {
-					fmt.Printf("%s\n", out.Bytes())
-				}
 			}
 
 			switch r.Method {
