@@ -190,7 +190,7 @@ Put File:
 				case "UnixNano":
 					return now.UnixNano()
 				default:
-					return time.Now().Format(layout)
+					return now.Format(layout)
 				}
 			},
 		}).Parse(*log)
