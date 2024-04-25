@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -26,7 +27,7 @@ import (
 
 func serverMain(exe string, args []string) error {
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
-	cnf := fs.String("c", "", "config file")
+	cnf := fs.String("c", "server.yaml", "config file")
 	path := fs.String("p", ".", "path")
 	listen := fs.String("s", "", "ip:port")
 	reg := fs.Bool("reg", false, "add right click registry")
@@ -48,21 +49,19 @@ func serverMain(exe string, args []string) error {
 			Ca     string `yaml:"ca"`
 		} `yaml:"certificate"`
 		Log struct {
-			lumberjack.Logger `yaml:"logger"`
-			Template          string `yaml:"template"`
+			Logger   *lumberjack.Logger `yaml:"logger"`
+			Template string             `yaml:"template"`
 		} `yaml:"log"`
 	}
 
-	if *cnf != "" {
-		d, err := os.ReadFile(*cnf)
-		if err != nil {
-			return err
-		}
+	data, err := os.ReadFile(*cnf)
+	if err != nil {
+		return err
+	}
 
-		err = yaml.Unmarshal(d, &config)
-		if err != nil {
-			return err
-		}
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return err
 	}
 
 	// 常用参数覆盖配置文件
@@ -206,13 +205,16 @@ Put File:
 		out:    os.Stdout,
 	}
 
-	if config.Log.Filename != "-" {
+	if config.Log.Logger != nil && config.Log.Logger.Filename != "-" {
+		//goland:noinspection GoUnhandledErrorResult
 		defer config.Log.Logger.Close()
-		srh.out = &config.Log.Logger
+		// log.logger.filename = "-" 或 不配置log.logger 时日志输出到 stdout
+		// 否则按照日志库的配置输出日志,支持日志文件按大小和天数切分
+		srh.out = config.Log.Logger
 	}
 
 	if config.Log.Template != "" {
-		// 读取命令行参数或文件,作为输出日志模板
+		// 当配置日志模板时,使用自定义模板输出日志
 		srh.log, err = template.New("").Funcs(template.FuncMap{
 			"time": func(layout string) any {
 				switch now := time.Now(); layout {
@@ -282,47 +284,50 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 	}
 
-	var err error
 	if r.RequestURI == "/favicon.ico" {
-		_, err = w.Write(icoData) // 返回网页的图标
-	} else {
-		if fs.auth != "" {
-			if user, pass, ok := r.BasicAuth(); !ok || user+":"+pass != fs.auth {
-				w.Header().Add("WWW-Authenticate", `Basic realm="Please Authenticate"`)
-				err = &webErr{code: http.StatusUnauthorized, msg: "Authenticate Error"}
+		//goland:noinspection GoUnhandledErrorResult
+		w.Write(icoData) // 返回网页的图标
+		return
+	}
+
+	var err error
+	if fs.auth != "" {
+		if user, pass, ok := r.BasicAuth(); !ok || user+":"+pass != fs.auth {
+			w.Header().Add("WWW-Authenticate", `Basic realm="Please Authenticate"`)
+			err = &webErr{code: http.StatusUnauthorized, msg: "Authenticate Error"}
+		}
+	}
+
+	if err == nil {
+		pool := bytePool.Get().(*poolByte)
+		defer bytePool.Put(pool)
+
+		if fs.log != nil {
+			buf := bytes.NewBuffer(pool.buf[:0])
+			err = fs.log.Execute(buf, map[string]any{
+				"req": r,
+			})
+			//goland:noinspection GoUnhandledErrorResult
+			if err != nil {
+				fmt.Fprintf(fs.out, "log error: %v\n", err)
+			} else {
+				fmt.Fprintf(fs.out, "%s", buf.Bytes())
 			}
 		}
 
-		if err == nil {
-			pool := bytePool.Get().(*poolByte)
-			defer bytePool.Put(pool)
-
-			if fs.log != nil {
-				buf := bytes.NewBuffer(pool.buf[:0])
-				err = fs.log.Execute(buf, map[string]any{
-					"req": r,
-				})
-				if err != nil {
-					fmt.Fprintf(fs.out, "log error: %v\n", err)
-				} else {
-					fmt.Fprintf(fs.out, "%s", buf.Bytes())
-				}
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				err = fs.get(w, r, pool.buf)
-			case http.MethodPost:
-				err = fs.post(w, r, pool.buf)
-			case http.MethodHead:
-				err = fs.head(w, r)
-			case http.MethodPut:
-				err = fs.put(w, r, pool.buf)
-			default:
-				err = &webErr{
-					code: http.StatusMethodNotAllowed,
-					msg:  r.Method + " not support",
-				}
+		switch r.Method {
+		case http.MethodGet:
+			err = fs.get(w, r, pool.buf)
+		case http.MethodPost:
+			err = fs.post(w, r, pool.buf)
+		case http.MethodHead:
+			err = fs.head(w, r)
+		case http.MethodPut:
+			err = fs.put(w, r, pool.buf)
+		default:
+			err = &webErr{
+				code: http.StatusMethodNotAllowed,
+				msg:  r.Method + " not support",
 			}
 		}
 	}
@@ -353,8 +358,6 @@ func (w *webErr) Error() string {
 	return w.msg
 }
 
-const denyDirMsg = "deny directory request"
-
 func (fs *fileServer) open(r *http.Request) (fr *os.File, fi os.FileInfo, err error) {
 	fr, err = os.Open(filepath.Join(fs.path, r.URL.Path))
 	if err != nil {
@@ -374,7 +377,7 @@ func (fs *fileServer) open(r *http.Request) (fr *os.File, fi os.FileInfo, err er
 	} else if fs.deny && fi.IsDir() {
 		err = &webErr{
 			code: http.StatusForbidden,
-			msg:  denyDirMsg,
+			msg:  "deny directory request",
 		}
 	}
 	return
@@ -390,8 +393,9 @@ func (fs *fileServer) head(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// 浏览器获取目录时显示一个简易的web页面
-var dirHtmlTpl = template.Must(template.New("").Parse(`<html lang="zh"><head><title>list dir</title></head><body>
+var dirHtmlTpl = sync.OnceValue(func() *template.Template {
+	// 浏览器获取目录时显示一个简易的web页面,有需要时只加载1次
+	return template.Must(template.New("").Parse(`<html lang="zh"><head><title>list dir</title></head><body>
 <div style="position:fixed;bottom:20px;right:10px"><p>
 <label><input type="radio" name="sort" onclick="sortDir(0)"{{if eq .sort 0}}checked{{end}}>名称升序</label>
 <label><input type="radio" name="sort" onclick="sortDir(1)"{{if eq .sort 1}}checked{{end}}>名称降序</label>
@@ -465,6 +469,7 @@ function backSuper() {
 	for (;i >= 0 && url[i] !== '/';i--){}
 	window.location.href = window.location.origin + url.substring(0,i+1)
 }</script></body></html>`))
+})
 
 func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) error {
 	fr, fi, err := fs.open(r)
@@ -524,7 +529,7 @@ func (fs *fileServer) get(w http.ResponseWriter, r *http.Request, buf []byte) er
 			info[i] = tmp
 		}
 
-		err = dirHtmlTpl.Execute(w, map[string]any{
+		err = dirHtmlTpl().Execute(w, map[string]any{
 			"sort": sortNum,
 			"info": info,
 		})
