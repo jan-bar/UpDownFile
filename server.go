@@ -54,14 +54,11 @@ func serverMain(exe string, args []string) error {
 		} `yaml:"log"`
 	}
 
-	data, err := os.ReadFile(*cnf)
-	if err != nil {
-		return err
-	}
-
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return err
+	if data, err := os.ReadFile(*cnf); err == nil {
+		// 读取配置文件成功时才解析配置,否则只生效参数配置
+		if err = yaml.Unmarshal(data, &config); err != nil {
+			return err
+		}
 	}
 
 	// 常用参数覆盖配置文件
