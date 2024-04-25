@@ -28,7 +28,7 @@ import (
 func serverMain(exe string, args []string) error {
 	fs := flag.NewFlagSet(exe, flag.ExitOnError)
 	cnf := fs.String("c", "server.yaml", "config file")
-	path := fs.String("p", ".", "path")
+	path := fs.String("p", "", "path")
 	listen := fs.String("s", "", "ip:port")
 	reg := fs.Bool("reg", false, "add right click registry")
 	err := fs.Parse(args)
