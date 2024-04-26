@@ -16,29 +16,17 @@
 
 ![展示Web页面](ShowWeb.png)
 
-执行：`upDownFile -h`，可查看服务端帮助信息：
+执行：`upDownFile -h`，可查看服务端帮助信息，配置文件示例 [server.yaml](https://github.com/jan-bar/UpDownFile/blob/master/server.yaml)
 ```shell
 Usage of UpDownFile:
-  -auth string
-        username:password
-  -ca string
-        ca file (default "ca.crt")
-  -cert string
-        cert file
-  -d string
-        domain name
-  -deny
-        deny directory request
-  -key string
-        key file
+  -c string
+        config file (default "server.yaml")
   -p string
-        path (default ".")
+        path
   -reg
         add right click registry
   -s string
         ip:port
-  -t duration
-        read header timeout (default 1m0s)
 ```
 
 执行：`upDownFile cli -h`，可查看客户端帮助信息：
@@ -61,12 +49,12 @@ Usage of UpDownFile cli:
 
 执行：`UpDownFile`会打印辅助信息，里面有使用curl和wget的上传下载文件命令。  
 ```bash
-upDownFile -s :443 -cert janbar.cert -key janbar.key -d janbar.com -auth "user:pass"
+upDownFile -c server.yaml -s :443 -p /webroot
 
 web service: https://127.0.0.1:443
 
 server:
-    upDownFile -s [::]:443 -p C:\dir -t 1m0s -ca ca.crt -cert janbar.cert -key janbar.key -d janbar.com
+    upDownFile -s [::]:443 -p /webroot
 registry:
     upDownFile -s [::]:443 -reg
 cli get:

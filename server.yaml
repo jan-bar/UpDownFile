@@ -16,8 +16,6 @@ certificate:
   cert: ""
   # key file path
   key: ""
-  # ca file path
-  ca: ""
 # log
 log:
   logger:

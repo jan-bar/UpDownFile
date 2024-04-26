@@ -46,7 +46,6 @@ func serverMain(exe string, args []string) error {
 			Domain string `yaml:"domain"`
 			Cert   string `yaml:"cert"`
 			Key    string `yaml:"key"`
-			Ca     string `yaml:"ca"`
 		} `yaml:"certificate"`
 		Log struct {
 			Logger   *lumberjack.Logger `yaml:"logger"`
@@ -67,6 +66,15 @@ func serverMain(exe string, args []string) error {
 	}
 	if *listen != "" {
 		config.Listen = *listen
+	}
+
+	var user, pass string
+	if config.Auth != "" {
+		var ok bool
+		user, pass, ok = strings.Cut(config.Auth, ":")
+		if !ok || user == "" || pass == "" {
+			return errors.New("invalid auth")
+		}
 	}
 
 	timeout := time.Minute
@@ -140,54 +148,45 @@ web service: {{$v}}
 {{- end}}
 
 server:
-    {{.exec}} -s {{.listen}} -p {{.dir}} -t {{.timeout}}{{if .auth}} -auth "{{.auth}}"{{end}}{{if .cert}} -ca {{.ca}} -cert {{.cert}}{{end}}{{if .key}} -key {{.key}}{{end}}{{if .domain}} -d {{.domain}}{{end}}
+    {{.exec}} -s {{.listen}} -p {{.path}}
 registry:
     {{.exec}} -s {{.listen}} -reg
 cli get:
-    {{.exec}} cli -c{{if .auth}} -auth "{{.auth}}"{{end}}{{if or .cert .key}} -ca {{.ca}}{{end}} -o C:\{{.example}} "{{.addr}}/{{.example}}"
+    {{.exec}} cli -c{{if or .user .pass}} -auth "{{.user}}:{{.pass}}"{{end}}{{if .https}} -ca ca.crt{{end}} -o C:\{{.example}} "{{.addr}}/{{.example}}"
 cli post:
-    {{.exec}} cli -c{{if .auth}} -auth "{{.auth}}"{{end}}{{if or .cert .key}} -ca {{.ca}}{{end}} -d @C:\{{.example}} "{{.addr}}/{{.example}}"
+    {{.exec}} cli -c{{if or .user .pass}} -auth "{{.user}}:{{.pass}}"{{end}}{{if .https}} -ca ca.crt{{end}} -d @C:\{{.example}} "{{.addr}}/{{.example}}"
 
 Get File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-c --content-disposition "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-C - -OJ "{{.addr}}/{{.example}}"
+    wget {{if .https}}--ca-certificate ca.crt {{end}}{{if or .user .pass}}--user "{{.user}}" --password "{{.pass}}" {{end}}-c --content-disposition "{{.addr}}/{{.example}}"
+    curl {{if .https}}--cacert ca.crt {{end}}{{if or .user .pass}}-u "{{.user}}:{{.pass}}" {{end}}-C - -OJ "{{.addr}}/{{.example}}"
 
 Post File:
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-qO - --post-file=C:\{{.example}} "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}--data-binary @C:\{{.example}} "{{.addr}}/{{.example}}"
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-F "file=@C:\{{.example}}" "{{.addr}}/{{.example}}/"
+    wget {{if .https}}--ca-certificate ca.crt {{end}}{{if or .user .pass}}--user "{{.user}}" --password "{{.pass}}" {{end}}-qO - --post-file=C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if .https}}--cacert ca.crt {{end}}{{if or .user .pass}}-u "{{.user}}:{{.pass}}" {{end}}--data-binary @C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if .https}}--cacert ca.crt {{end}}{{if or .user .pass}}-u "{{.user}}:{{.pass}}" {{end}}-F "file=@C:\{{.example}}" "{{.addr}}/{{.example}}/"
 
 Get Offset:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-H "Content-Type:application/offset" "{{.addr}}/{{.example}}"
-    wget {{if or .cert .key}}--ca-certificate {{.ca}} {{end}}{{if .wget}}{{.wget}} {{end}}-qO - --header "Content-Type:application/offset" "{{.addr}}/{{.example}}"
+    curl {{if .https}}--cacert ca.crt {{end}}{{if or .user .pass}}-u "{{.user}}:{{.pass}}" {{end}}-H "Content-Type:application/offset" "{{.addr}}/{{.example}}"
+    wget {{if .https}}--ca-certificate ca.crt {{end}}{{if or .user .pass}}--user "{{.user}}" --password "{{.pass}}" {{end}}-qO - --header "Content-Type:application/offset" "{{.addr}}/{{.example}}"
 
 Put File:
-    curl {{if or .cert .key}}--cacert {{.ca}} {{end}}{{if .auth}}-u "{{.auth}}" {{end}}-C - -T C:\{{.example}} "{{.addr}}/{{.example}}"
+    curl {{if .https}}--cacert ca.crt {{end}}{{if or .user .pass}}-u "{{.user}}:{{.pass}}" {{end}}-C - -T C:\{{.example}} "{{.addr}}/{{.example}}"
 
 `)
 	if err != nil {
 		return err
 	}
 
-	var wget string
-	if user, pass, ok := strings.Cut(config.Auth, ":"); ok {
-		wget = fmt.Sprintf(`--user "%s" --password "%s"`, user, pass)
-	}
-
 	err = tpl.Execute(os.Stdout, map[string]any{
+		"urls":    urls,
 		"exec":    exe,
 		"listen":  addr.Addr().String(),
-		"urls":    urls,
-		"addr":    addrStr,
-		"domain":  config.Certificate.Domain,
+		"path":    config.Path,
+		"user":    user,
+		"pass":    pass,
+		"https":   uri.Scheme == schemeHttps,
 		"example": "example.txt",
-		"dir":     config.Path,
-		"timeout": timeout.String(),
-		"cert":    config.Certificate.Cert,
-		"key":     config.Certificate.Key,
-		"ca":      config.Certificate.Ca,
-		"auth":    config.Auth,
-		"wget":    wget,
+		"addr":    addrStr,
 	})
 	if err != nil {
 		return err
