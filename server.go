@@ -274,6 +274,7 @@ var (
 	respOk = []byte("ok")
 )
 
+//goland:noinspection GoUnhandledErrorResult
 func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		//goland:noinspection GoUnhandledErrorResult
@@ -281,7 +282,6 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.RequestURI == "/favicon.ico" {
-		//goland:noinspection GoUnhandledErrorResult
 		w.Write(icoData) // 返回网页的图标
 		return
 	}
@@ -340,7 +340,8 @@ func (fs *fileServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set(headerType, "text/html;charset=utf-8")
 		w.WriteHeader(e.code)
-		_, _ = fmt.Fprintf(w, `<html><head><title>UpDownFile</title></head><body><center><h1>%s</h1></center><hr><center>%v</center></body></html>`, e.msg, e.err)
+		fmt.Fprintf(w, `<html><head><title>UpDownFile</title></head><body><center><h1>%s</h1></center><hr><center>%v</center></body></html>`, e.msg, e.err)
+		fmt.Fprintf(fs.out, "code:%d,msg:%s,err:%v\n", e.code, e.msg, e.err)
 	}
 }
 
