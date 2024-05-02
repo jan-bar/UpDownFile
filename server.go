@@ -122,11 +122,9 @@ func serverMain(exe string, args []string) error {
 
 		tcpAddr.IP = net.IPv4(127, 0, 0, 1)
 	}
-	uri.Host = tcpAddr.String()
-	urls = append(urls, uri.String())
 
 	if config.Certificate.Domain == "" {
-		uri.Host = tcpAddr.IP.String()
+		uri.Host = tcpAddr.String()
 	} else {
 		uri.Host = config.Certificate.Domain
 	}
@@ -136,6 +134,8 @@ func serverMain(exe string, args []string) error {
 		// 不是特殊协议和端口,需要拼接端口,特殊协议不需要带上端口
 		uri.Host = net.JoinHostPort(uri.Host, strconv.Itoa(tcpAddr.Port))
 	}
+	urls = append(urls, uri.String())
+
 	addrStr := uri.String()
 
 	config.Path, err = filepath.Abs(config.Path)
